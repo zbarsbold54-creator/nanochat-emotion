@@ -9,10 +9,36 @@ Adapted from: https://github.com/KellerJordan/modded-nanogpt
 Further contributions from @karpathy and @chrisjmccormick.
 """
 
+import os
 import torch
 import torch.distributed as dist
 from torch import Tensor
 from nanochat.common import COMPUTE_DTYPE
+
+# -----------------------------------------------------------------------------
+# Windows / Triton-less compat shim.
+# The fused optimizer steps below are decorated with @torch.compile for speed.
+# Inductor's backend requires Triton, which has no official Windows wheel, so
+# compiling raises at *call* time on such platforms. Detect once at import and
+# fall back to plain eager execution. This is a performance-only fallback: the
+# math executed is byte-for-byte the same code, in the same order, with the same
+# dtype policy. It does not alter the optimizer algorithm.
+def _triton_available():
+    if os.environ.get("NANOCHAT_COMPILE", "1") == "0":
+        return False
+    if os.name == "nt":  # no official triton wheels for Windows
+        return False
+    try:
+        import triton  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+COMPILE_STEPS = _triton_available()
+
+def _maybe_compile(fn):
+    """Apply torch.compile when the platform supports it, else return fn as-is."""
+    return torch.compile(fn, dynamic=False, fullgraph=True) if COMPILE_STEPS else fn
 
 # -----------------------------------------------------------------------------
 """
@@ -20,7 +46,7 @@ Good old AdamW optimizer, fused kernel.
 https://arxiv.org/abs/1711.05101
 """
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_maybe_compile
 def adamw_step_fused(
     p: Tensor,              # (32768, 768) - parameter tensor
     grad: Tensor,           # (32768, 768) - gradient, same shape as p
@@ -108,7 +134,7 @@ polar_express_coeffs = [
 ]
 
 
-@torch.compile(dynamic=False, fullgraph=True)
+@_maybe_compile
 def muon_step_fused(
     stacked_grads: Tensor,          # (12, 768, 3072) - stacked gradients
     stacked_params: Tensor,         # (12, 768, 3072) - stacked parameters

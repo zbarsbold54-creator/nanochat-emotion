@@ -242,8 +242,16 @@ def disable_fp8(model):
 # -----------------------------------------------------------------------------
 # Compile the model
 
+# Windows/minimal-CPU environments: torch.compile's inductor backend needs Triton,
+# which has no official Windows wheel. Reuse the same detection as the optimizer so
+# we fall back to eager mode rather than crashing. Performance only, not numerics.
+# Can also be forced off with NANOCHAT_COMPILE=0.
+from nanochat.optim import COMPILE_STEPS as do_compile
+if not do_compile:
+    print0("WARNING: torch.compile disabled (Triton unavailable on this platform); running eager. Slower, same numerics.")
+
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+model = torch.compile(model, dynamic=False) if do_compile else model # the inputs to model will never change shape so dynamic=False is safe
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.

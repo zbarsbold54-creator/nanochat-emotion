@@ -8,6 +8,7 @@ For details of how the dataset was prepared, see `repackage_data_reference.py`.
 """
 
 import os
+import sys
 import argparse
 import time
 import requests
@@ -18,13 +19,44 @@ from nanochat.common import get_base_dir
 
 # -----------------------------------------------------------------------------
 # The specifics of the current pretraining dataset
+#
+# Two datasets are supported. The default is the current mainline ClimbMix-400B,
+# but the original FineWeb-EDU-100B parquet packaging is still selectable via the
+# NANOCHAT_DATASET env var (e.g. NANOCHAT_DATASET=fineweb-edu), which is useful for
+# baselines / reproducing the older FineWeb-EDU workflow. Each dataset gets its
+# own local directory so the two can coexist on disk.
+
+DATASETS = {
+    "climbmix": {
+        "base_url": "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main",
+        "max_shard": 6542, # the last datashard is shard_06542.parquet
+        "data_dir_name": "base_data_climbmix",
+        "legacy_dir_name": None,
+        "blurb": "ClimbMix-400B (current nanochat mainline default)",
+    },
+    "fineweb-edu": {
+        "base_url": "https://huggingface.co/datasets/karpathy/fineweb-edu-100b-shuffle/resolve/main",
+        # the fineweb-edu-100b-shuffle repo currently ships 998 shards, so the
+        # last (always-downloaded validation) shard is shard_00997.parquet
+        "max_shard": 997,
+        "data_dir_name": "base_data_fineweb_edu",
+        "legacy_dir_name": "base_data", # the original FineWeb-EDU dir name
+        "blurb": "FineWeb-EDU-100B (original nanochat pretraining dataset)",
+    },
+}
+
+DATASET_NAME = os.environ.get("NANOCHAT_DATASET", "climbmix").strip().lower()
+if DATASET_NAME not in DATASETS:
+    raise ValueError(f"Unknown NANOCHAT_DATASET={DATASET_NAME!r}, expected one of {sorted(DATASETS)}")
+_DATASET = DATASETS[DATASET_NAME]
 
 # The URL on the internet where the data is hosted and downloaded from on demand
-BASE_URL = "https://huggingface.co/datasets/karpathy/climbmix-400b-shuffle/resolve/main"
-MAX_SHARD = 6542 # the last datashard is shard_06542.parquet
+BASE_URL = _DATASET["base_url"]
+MAX_SHARD = _DATASET["max_shard"] # the last datashard, always used as the validation shard
 index_to_filename = lambda index: f"shard_{index:05d}.parquet" # format of the filenames
 base_dir = get_base_dir()
-DATA_DIR = os.path.join(base_dir, "base_data_climbmix")
+DATA_DIR = os.path.join(base_dir, _DATASET["data_dir_name"])
+LEGACY_DATA_DIR = os.path.join(base_dir, _DATASET["legacy_dir_name"]) if _DATASET["legacy_dir_name"] else None
 
 # -----------------------------------------------------------------------------
 # These functions are useful utilities to other modules, can/should be imported
@@ -33,9 +65,9 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False):
     """ Looks into a data dir and returns full paths to all parquet files. """
     data_dir = DATA_DIR if data_dir is None else data_dir
 
-    # Legacy-supporting code due to the upgrade from FinewebEdu-100B to ClimbMix-400B
-    # This code will eventually be deleted.
-    if not os.path.exists(data_dir):
+    # Legacy-supporting code for FineWeb-EDU, which was originally downloaded into
+    # a `base_data` directory. Only active for the fineweb-edu dataset selection.
+    if not os.path.exists(data_dir) and LEGACY_DATA_DIR is not None:
         if warn_on_legacy:
             print()
             print("=" * 80)
@@ -43,19 +75,23 @@ def list_parquet_files(data_dir=None, warn_on_legacy=False):
             print("=" * 80)
             print()
             print(f"  Could not find: {data_dir}")
+            print(f"  Selected dataset: {DATASET_NAME} ({_DATASET['blurb']})")
             print()
-            print("  nanochat recently switched from FinewebEdu-100B to ClimbMix-400B.")
-            print("  Everyone who does `git pull` as of March 4, 2026 is expected to see this message.")
-            print("  To upgrade to the new ClimbMix-400B dataset, run these two commands:")
+            print("  To download it, run, e.g.:")
             print()
-            print("    python -m nanochat.dataset -n 170     # download ~170 shards, enough for GPT-2, adjust as desired")
-            print("    python -m scripts.tok_train           # re-train tokenizer on new ClimbMix data")
+            print("    python -m nanochat.dataset -n 10")
             print()
-            print("  For now, falling back to your old FinewebEdu-100B dataset...")
+            print(f"  For now, falling back to your old {LEGACY_DATA_DIR} dataset...")
             print("=" * 80)
             print()
         # attempt a fallback to the legacy data directory
-        data_dir = os.path.join(base_dir, "base_data")
+        data_dir = LEGACY_DATA_DIR
+
+    if not os.path.exists(data_dir):
+        raise FileNotFoundError(
+            f"No parquet data directory found: {DATA_DIR} (dataset={DATASET_NAME}). "
+            f"Run `python -m nanochat.dataset -n <num_shards>` to download it."
+        )
 
     parquet_files = sorted([
         f for f in os.listdir(data_dir)
@@ -137,7 +173,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download pretraining dataset shards")
     parser.add_argument("-n", "--num-files", type=int, default=-1, help="Number of train shards to download (default: -1), -1 = disable")
     parser.add_argument("-w", "--num-workers", type=int, default=4, help="Number of parallel download workers (default: 4)")
+    parser.add_argument("--dataset", type=str, default=None, choices=sorted(DATASETS), help="Dataset to download: 'climbmix' (default) or 'fineweb-edu'. Alias for the NANOCHAT_DATASET env var.")
     args = parser.parse_args()
+
+    # Allow `--dataset fineweb-edu` as a friendlier alias for the NANOCHAT_DATASET
+    # env var, which is the source of truth (read at import time).
+    if args.dataset is not None and args.dataset.strip().lower() != DATASET_NAME:
+        os.environ["NANOCHAT_DATASET"] = args.dataset.strip().lower()
+        print(f"Re-launching with NANOCHAT_DATASET={os.environ['NANOCHAT_DATASET']} ...")
+        os.execv(sys.executable, [sys.executable, "-m", "nanochat.dataset"] + sys.argv[1:])
 
     # Prepare the output directory
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -149,7 +193,9 @@ if __name__ == "__main__":
     ids_to_download.append(MAX_SHARD) # always download the validation shard
 
     # Download the shards
-    print(f"Downloading {len(ids_to_download)} shards using {args.num_workers} workers...")
+    print(f"Dataset: {DATASET_NAME} ({_DATASET['blurb']})")
+    print(f"Source: {BASE_URL}")
+    print(f"Downloading {len(ids_to_download)} shards ({num_train_shards} train + 1 val) using {args.num_workers} workers...")
     print(f"Target directory: {DATA_DIR}")
     print()
     with Pool(processes=args.num_workers) as pool:
