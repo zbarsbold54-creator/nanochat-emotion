@@ -27,7 +27,7 @@ So the two hypotheses separate cleanly:
 This script reports the gap so the distinction is measured, not assumed.
 """
 import sys, os, math, argparse
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 

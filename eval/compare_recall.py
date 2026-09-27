@@ -29,7 +29,7 @@ _spec.loader.exec_module(_bas)
 split_sentences = _bas.split_sentences
 sentences_text = _bas.sentences_text
 
-EVAL_PATH = os.path.join(REPO, "eval_anomaly_set.jsonl")
+EVAL_PATH = os.path.join(REPO, "eval", "eval_anomaly_set.jsonl")
 MAX_LEN = 1024
 ANOMALY_TYPES = ["factual_contradiction", "topic_break", "token_noise"]
 
@@ -226,13 +226,14 @@ def main():
         print("%-26s %10.4f %10.4f %10.4f %10.4f %10.4f %6d" %
               (t, am, asd, bm, bsd, bm - am, n))
 
-    with open("recall_comparison.json", "w") as f:
+    out_path = os.path.join(REPO, "eval", "recall_comparison.json")
+    with open(out_path, "w") as f:
         json.dump({"per_doc": per_doc, "skipped": skipped,
                    "summary": rowsout,
                    "A": {"step": meta_a["step"], "val_bpb": meta_a["val_bpb"]},
                    "B": {"step": meta_b["step"], "val_bpb": meta_b["val_bpb"]},
                    "film_log": meta_b.get("rda_film_log")}, f, indent=2)
-    print("\nwrote recall_comparison.json")
+    print("\nwrote %s" % out_path)
 
 
 if __name__ == "__main__":

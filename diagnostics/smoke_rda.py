@@ -2,7 +2,7 @@
 5-step smoke test for RDA optimizer coverage.
 
 TEMPORARY; deleted after use.
-Run:  python smoke_rda.py
+Run:  python diagnostics/smoke_rda.py
 Checks, on the REAL setup_optimizer path:
   1. every state.*/predictor.* param is in some optimizer group (by name)
   2. those params receive NONZERO gradient after backward
@@ -12,7 +12,7 @@ import os
 import sys
 import torch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nanochat.gpt import GPT, GPTConfig
 from nanochat.rda import GPTWithRDA

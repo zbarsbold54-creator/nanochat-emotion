@@ -15,7 +15,7 @@ Saturation fraction per dimension = fraction of steps in which the batch-mean
 |E[dim]| exceeded 0.99, i.e. the dimension sat at the rail.
 """
 import sys, os, math, argparse
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 

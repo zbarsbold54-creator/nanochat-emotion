@@ -58,7 +58,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-OUTPUT_PATH = os.path.join(REPO_ROOT, "eval_anomaly_set.jsonl")
+OUTPUT_PATH = os.path.join(REPO_ROOT, "eval", "eval_anomaly_set.jsonl")
 TARGET_DOC_COUNT = 500
 
 ANOMALY_TYPES = ["factual_contradiction", "topic_break", "token_noise"]

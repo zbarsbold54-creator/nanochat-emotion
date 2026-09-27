@@ -336,7 +336,7 @@ Artifacts: tokenizer in `%USERPROFILE%\.cache\nanochat\tokenizer\`, data in
 `%USERPROFILE%\.cache\nanochat\base_data_fineweb_edu\`, checkpoint
 (`model_000600.pt`, `optim_000600_rank0.pt`, `meta_000600.json`) in
 `%USERPROFILE%\.cache\nanochat\base_checkpoints\baseline-fwedu-d8\`.
-Full training log: `baseline_train.log` in the repo root.
+Full training log: `logs/baseline_train.log`.
 
 ---
 

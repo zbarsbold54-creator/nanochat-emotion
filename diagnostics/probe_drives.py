@@ -15,7 +15,7 @@ Runs the real training path (real data, real config, real optimizer) for 30
 steps. Nothing is saved; this is measurement only.
 """
 import sys, os, math, argparse
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 

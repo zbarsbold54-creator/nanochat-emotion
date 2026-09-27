@@ -6,7 +6,7 @@ GPU time. Confirms:
   3. h_norm params are registered under state.* so coverage must catch them
 """
 import sys, os, math
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from nanochat.rda import RDAStateModule
 

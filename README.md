@@ -87,7 +87,7 @@ There is also a structural caveat worth knowing before drawing conclusions from 
 trajectories: `update()` runs once per token position within a single forward pass, so the
 state relaxes geometrically along *position* and the trajectory is largely a function of how
 much context has accumulated. Content sensitivity is real but much smaller than the
-positional ramp. Diagnostic tooling for this lives in `diagnose_saturation.py`.
+positional ramp. Diagnostic tooling for this lives in `diagnostics/diagnose_saturation.py`.
 
 ## Usage
 
@@ -128,8 +128,9 @@ python demo/run_demo.py                 # interactive loop
 ### Evaluation
 
 ```bash
-python eval/compare_recall.py            # anomaly-recall comparison vs baseline
-python smoke_rda.py                      # optimizer-coverage / gradient smoke test
+python eval/compare_recall.py                   # anomaly-recall comparison vs baseline
+python diagnostics/smoke_rda.py                 # optimizer-coverage / gradient smoke test
+python diagnostics/check_mermaid.py             # validate the diagram in this file
 ```
 
 ## Credits
@@ -149,51 +150,70 @@ flowchart LR
 
     subgraph RDA["Regulatory Drive State"]
         direction TB
-        HID --> PED["PE Drive"]
         HID --> EVD["Event Drive"]
+        LOG --> PED["PE Drive"]
         PED --> GATE{{"Gated Update"}}
         EVD --> GATE
-        ET["Drive State Et"] --> GATE
-        GATE --> ET
-        ET --> FILM{{"FiLM Modulation"}}
+        ET_PRE["E_t (pre-update)"] --> GATE
+        GATE --> ET_POST["E_t+1 (post-update)"]
+        ET_POST --> FILM{{"FiLM Modulation"}}
         HID --> FILM
     end
 
-    GATE --> PRED["State Predictor"]
+    ET_PRE --> PRED["State Predictor"]
+    HID --> PRED
     PRED --> PNX["Predicted Next State"]
     PNX --> CMP{{"Compare"}}
-    GATE --> CMP
+    ET_POST --> CMP
     CMP --> DPE["Drive Prediction Error"]
 
     FILM --> LMH["LM Head"]
     LMH --> LOG["Next-token Logits"]
-    DPE --> LOG
 
-    LOG --> PED
-
-    classDef unconsumed stroke-dasharray: 5 5,opacity:.75;
+    classDef unconsumed fill:#D9D9D9,stroke:#B3B3B3;
     class PRED,PNX,CMP,DPE unconsumed;
 ```
 
-Solid arrows carry the live forward path. The dashed **Prediction-Error Pathway** is
-implemented but not wired into learning.
+**DPE is a dead end.** `Drive Prediction Error` (grey) is computed and logged, but nothing
+consumes it — it is not an input to the LM head, the loss, or the next state. `Drive
+Prediction Error` terminates there deliberately; the grey fill marks the whole
+prediction-error pathway as implemented-but-unused.
 
-The diagram above is the whole forward pass. Reading it left to right:
+**ET_PRE vs ET_POST.** The predictor is given the state *before* this step's update
+(`E_t`) plus the pre-outcome hidden state; the comparison then pits its forecast against the
+state *after* the update (`E_t+1`). Conflating them would imply the predictor sees the
+value it is being scored against.
+
+**FiLM is applied per position,** each with the causal state for that position: position 0
+is modulated by the state entering the sequence, and position `p` by the state as it stood
+after position `p-1` was consumed. No position is ever modulated by a state derived from a
+later token. The earlier implementation applied FiLM once, after the loop, using the final
+state — which meant position 0 was modulated by a state computed from the last token, a
+1022-token lookahead at T=1024, and made the architecture impossible to reproduce during
+autoregressive decoding.
+
+Reading it left to right:
 
 - **Token sequence → Transformer trunk → Hidden states.** The RDA module reads the
   pre-outcome hidden state at each position; it does not modify the trunk.
-- **PE Drive** takes the token-level prediction error. **Event Drive** takes the normalised
-  hidden state. Both feed the **Gated Update**, which mixes the incoming `Drive State Et`
-  with the new drive — `E_{t+1} = decay·E_t + (1-decay)·tanh(·)`.
-- **FiLM Modulation** is the only path by which the state affects the model. It modulates
-  the residual stream before the **LM Head** produces next-token logits.
-- **Prediction-Error Pathway (dashed, Not Yet Consumed).** The state predictor tries to
-  forecast the next drive state, and the **Drive Prediction Error** is the difference. It is
-  computed and logged, but nothing consumes it — so the predictor currently receives no
+- **PE Drive** takes the token-level prediction error, which comes from the logits, not
+  from the hidden state. **Event Drive** takes the normalised hidden state. Both feed the
+  **Gated Update**, which mixes the incoming `E_t` with the new drive —
+  `E_{t+1} = decay·E_t + (1-decay)·tanh(·)`.
+- **FiLM Modulation** is the only path by which the state affects the model. Each position is
+  modulated by the causal state for that position, then the residual stream feeds the
+  **LM Head** to produce next-token logits. During generation the state is threaded through
+  the KV-cache decode steps, so single-token decoding continues the same recurrence
+  training established.
+- **Prediction-Error Pathway (grey, not yet consumed).** The state predictor tries to
+  forecast the next drive state, and the **Drive Prediction Error** is the difference. It
+  is computed and logged, but nothing consumes it — so the predictor currently receives no
   gradient. This is the next thing to wire up.
 
 The same diagram lives in [`dev/rda_architecture.mmd`](dev/rda_architecture.mmd) if you want
-to render it elsewhere.
+to render it elsewhere. `diagnostics/check_mermaid.py` validates the block in this file and
+re-syncs
+the `.mmd` from it, so the two cannot drift.
 
 ## Layout
 
@@ -204,9 +224,10 @@ to render it elsewhere.
 | `demo/run_demo.py` | read-only interactive demo |
 | `eval/compare_recall.py` | anomaly-recall A/B harness |
 | `eval/build_anomaly_set.py` | synthetic anomaly set generator |
-| `smoke_rda.py` | optimizer coverage + gradient smoke test |
-| `smoke_saturation.py` | drive-saturation gate, 30/60-step |
-| `diagnose_saturation.py` | 200-step tripwire + fixed-point gap analysis |
-| `probe_drives.py` | separates the event and prediction-error drive terms |
-| `check_hnorm.py` | LayerNorm scale-invariance check |
-| `analyze_loss_slope.py` | loss-vs-saturation analysis |
+| `diagnostics/smoke_rda.py` | optimizer coverage + gradient smoke test |
+| `diagnostics/smoke_saturation.py` | drive-saturation gate, 30/60-step |
+| `diagnostics/diagnose_saturation.py` | 200-step tripwire + fixed-point gap analysis |
+| `diagnostics/probe_drives.py` | separates the event and prediction-error drive terms |
+| `diagnostics/check_hnorm.py` | LayerNorm scale-invariance check |
+| `diagnostics/analyze_loss_slope.py` | loss-vs-saturation analysis |
+| `diagnostics/diagnose_film_causality.py` | measures FiLM positional causality |
