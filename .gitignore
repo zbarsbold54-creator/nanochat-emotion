@@ -4,6 +4,13 @@ __pycache__/
 dev-ignore/
 report.md
 eval_bundle/
+base_checkpoints/
+
+# Generated training/eval artifacts. These are reproducible outputs, not
+# source: kept on disk, excluded from git.
+logs/
+eval/eval_anomaly_set.jsonl
+eval/recall_comparison.json
 
 # Secrets
 .env

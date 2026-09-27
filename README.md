@@ -231,3 +231,33 @@ the `.mmd` from it, so the two cannot drift.
 | `diagnostics/check_hnorm.py` | LayerNorm scale-invariance check |
 | `diagnostics/analyze_loss_slope.py` | loss-vs-saturation analysis |
 | `diagnostics/diagnose_film_causality.py` | measures FiLM positional causality |
+| `diagnostics/checkpoint_roundtrip.py` | trains briefly and saves a probe checkpoint |
+| `diagnostics/checkpoint_roundtrip_verify.py` | reloads it in a fresh process, value-exact |
+
+Generated outputs are **not** in git — they are reproducible and were
+committing to the repo by accident:
+
+| path | what | regenerate with |
+|---|---|---|
+| `logs/*.log` | training / eval stdout captures | any `base_train.py` run |
+| `eval/eval_anomaly_set.jsonl` | synthetic anomaly set (~5.5 MB) | `python eval/build_anomaly_set.py` |
+| `eval/recall_comparison.json` | recall A/B results | `python eval/compare_recall.py` |
+| `base_checkpoints/` | model weights | `python scripts/base_train.py` |
+
+`eval/build_anomaly_set.py` writes its output to `eval/`, and
+`compare_recall.py` reads it from there, so the two stay consistent even
+though the file is untracked.
+
+### Verifying a checkpoint actually loads
+
+Shape-matching a state dict does not prove a checkpoint was applied. A
+checkpoint that is read but never handed to `load_state_dict` leaves the
+model at random init while every shape check still passes — that bug
+silently invalidated an entire round of recall numbers once already. The
+round-trip pair checks values against the file on disk instead, and asserts
+the pre-load value *differs* so the test cannot pass vacuously:
+
+```bash
+python diagnostics/checkpoint_roundtrip.py        # train 20 steps, save
+python diagnostics/checkpoint_roundtrip_verify.py # fresh process, exact compare
+```
