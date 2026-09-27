@@ -1,10 +1,5 @@
-%% RDA — Regulatory Drive Architecture, forward pass
-%% Source of truth for the diagram rendered in README.md.
-%% Render with:
-%%   npx @mermaid-js/mermaid-cli -i dev/rda_architecture.mmd \
-%%     -o dev/rda_architecture.png -b white
 flowchart LR
-    TOK[/"Token Sequence"/] --> TRUNK["Transformer Trunk"]
+    TOK["Token Sequence"] --> TRUNK["Transformer Trunk"]
     TRUNK --> HID["Hidden States"]
 
     subgraph RDA["Regulatory Drive State"]
@@ -13,7 +8,7 @@ flowchart LR
         HID --> EVD["Event Drive"]
         PED --> GATE{{"Gated Update"}}
         EVD --> GATE
-        ET[(("Drive State Et"))] -.->|"carries over"| GATE
+        ET["Drive State Et"] --> GATE
         GATE --> ET
         ET --> FILM{{"FiLM Modulation"}}
         HID --> FILM
@@ -22,14 +17,14 @@ flowchart LR
     GATE --> PRED["State Predictor"]
     PRED --> PNX["Predicted Next State"]
     PNX --> CMP{{"Compare"}}
-    GATE -.->|"not yet consumed"| CMP
-    CMP --> DPE[/"Drive Prediction Error"/]
+    GATE --> CMP
+    CMP --> DPE["Drive Prediction Error"]
 
     FILM --> LMH["LM Head"]
-    LMH --> LOG[/"Next-token Logits"/]
-    DPE -.-> LOG
+    LMH --> LOG["Next-token Logits"]
+    DPE --> LOG
 
-    LOG -.->|"token loss"| PED
+    LOG --> PED
 
     classDef unconsumed stroke-dasharray: 5 5,opacity:.75;
     class PRED,PNX,CMP,DPE unconsumed;

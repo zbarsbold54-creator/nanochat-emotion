@@ -144,7 +144,7 @@ on top of it, and the RDA additions are not part of nanochat.
 
 ```mermaid
 flowchart LR
-    TOK[/"Token Sequence"/] --> TRUNK["Transformer Trunk"]
+    TOK["Token Sequence"] --> TRUNK["Transformer Trunk"]
     TRUNK --> HID["Hidden States"]
 
     subgraph RDA["Regulatory Drive State"]
@@ -153,7 +153,7 @@ flowchart LR
         HID --> EVD["Event Drive"]
         PED --> GATE{{"Gated Update"}}
         EVD --> GATE
-        ET[(("Drive State Et"))] -.->|"carries over"| GATE
+        ET["Drive State Et"] --> GATE
         GATE --> ET
         ET --> FILM{{"FiLM Modulation"}}
         HID --> FILM
@@ -162,18 +162,21 @@ flowchart LR
     GATE --> PRED["State Predictor"]
     PRED --> PNX["Predicted Next State"]
     PNX --> CMP{{"Compare"}}
-    GATE -.->|"not yet consumed"| CMP
-    CMP --> DPE[/"Drive Prediction Error"/]
+    GATE --> CMP
+    CMP --> DPE["Drive Prediction Error"]
 
     FILM --> LMH["LM Head"]
-    LMH --> LOG[/"Next-token Logits"/]
-    DPE -.-> LOG
+    LMH --> LOG["Next-token Logits"]
+    DPE --> LOG
 
-    LOG -.->|"token loss"| PED
+    LOG --> PED
 
     classDef unconsumed stroke-dasharray: 5 5,opacity:.75;
     class PRED,PNX,CMP,DPE unconsumed;
 ```
+
+Solid arrows carry the live forward path. The dashed **Prediction-Error Pathway** is
+implemented but not wired into learning.
 
 The diagram above is the whole forward pass. Reading it left to right:
 
