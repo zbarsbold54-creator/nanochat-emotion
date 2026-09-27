@@ -15,6 +15,7 @@ import torch
 import torch.nn.functional as F
 import signal
 import warnings
+from dataclasses import dataclass
 from contextlib import contextmanager
 from collections import deque
 from nanochat.common import compute_init, autodetect_device_type, COMPUTE_DTYPE
@@ -166,6 +167,18 @@ class RowState:
         self.python_expr_tokens = [] # Tokens of the current python expression
         self.completed = False # Whether this row has completed generation
 
+@dataclass
+class _RDAForward:
+    """Result of one generation-time forward: logits plus carried RDA state.
+
+    `state` is None for a plain GPT, in which case generation simply has no
+    state to thread. For GPTWithRDA it is a (B, n_drives) tensor, or None on the
+    very first prefill if the model did not record one.
+    """
+    logits: torch.Tensor
+    state: torch.Tensor | None = None
+
+
 class Engine:
 
     def __init__(self, model, tokenizer):
@@ -202,8 +215,11 @@ class Engine:
             **kv_model_kwargs,
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits = self.model.forward(ids, kv_cache=kv_cache_prefill)
-        logits = logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
+        # RDA models carry an affective state across steps. Prefill is batch 1
+        # and the state it produces is broadcast to every sample below.
+        rda = self._rda_forward(ids, kv_cache=kv_cache_prefill, E_t_external=None)
+        logits = rda.logits[:, -1, :].expand(num_samples, -1)  # (num_samples, vocab_size)
+        rda_state = rda.state
 
         # 2) Replicate the KV cache for each sample/row
         kv_length_hint = (len(tokens) + max_tokens) if max_tokens is not None else self.model.config.sequence_len
@@ -270,9 +286,36 @@ class Engine:
             yield token_column, token_masks
             num_generated += 1
 
-            # Prepare logits for next iteration
+            # Prepare logits for next iteration. The carried RDA state makes
+            # T=1 decoding continue the same recurrence the prefill started.
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
-            logits = self.model.forward(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
+            rda = self._rda_forward(ids, kv_cache=kv_cache_decode, E_t_external=rda_state)
+            logits = rda.logits[:, -1, :]  # (B, vocab_size)
+            rda_state = rda.state
+
+    def _rda_forward(self, ids, kv_cache=None, E_t_external=None):
+        """Call the model, transparently handling RDA wrappers and plain GPT.
+
+        A plain nanochat GPT.forward returns logits and has no notion of state.
+        GPTWithRDA.forward also returns bare logits on the targets=None path,
+        but additionally records the final affective state, which the caller
+        must thread through generation via E_t_external. Returning both in one
+        small record keeps the generation loop agnostic to which model it has.
+        """
+        is_rda = hasattr(self.model, "state") and hasattr(self.model, "predictor")
+        if is_rda:
+            logits = self.model.forward(
+                ids, kv_cache=kv_cache, E_t_external=E_t_external
+            )
+        else:
+            # Plain GPT: no affective state, so nothing to carry.
+            logits = self.model.forward(ids, kv_cache=kv_cache)
+        state = getattr(self.model, "last_state", None) if is_rda else None
+        if state is not None and E_t_external is None:
+            # Prefill: the state was produced from a batch-1 row. Broadcast to
+            # the sample batch, and detach so decode steps can carry it.
+            state = state.expand(logits.size(0), -1).detach()
+        return _RDAForward(logits=logits, state=state)
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):
         """

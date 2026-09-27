@@ -199,16 +199,41 @@ class RDAStateModule(nn.Module):
 
     # -- modulation ---------------------------------------------------------
     def modulate(self, x, E_t) -> torch.Tensor:
-        """FiLM-modulate hidden states x (B, T, d_model) with state E_t (B, n_drives).
+        """FiLM-modulate hidden states x (B, T, d_model) with a PER-POSITION
+        drive state.
+
+        E_t is (B, T, n_drives) -- one state vector per position, aligned with
+        x along dim 1. Each position is modulated only by the state as of that
+        position, so the result is causally masked: position p cannot be
+        influenced by tokens after p.
+
+        This used to take (B, n_drives) and broadcast one vector to every
+        position, which meant position 0 was modulated by a state computed
+        from the LAST token -- a 1022-token lookahead at T=1024. That also made
+        the architecture impossible to reproduce at inference, since an
+        autoregressive decode step has no "final state" to draw on.
+
+        A single (B, n_drives) state is also accepted and broadcast over
+        positions, but that is only correct when the caller has genuinely
+        established the same state applies to all of them -- i.e. a single
+        decode step. Broadcasting a per-sequence state across positions is
+        exactly the bug this signature was changed to fix.
 
         With zero-initialized film layers this is exactly the identity at
-        initialization.
+        initialization, per position.
         """
-        if E_t.dim() == 3:
-            E_t = E_t.mean(dim=1)
-        scale = 1.0 + self.film_scale(E_t)  # (B, d_model)
-        shift = self.film_shift(E_t)        # (B, d_model)
-        return x * scale.unsqueeze(1) + shift.unsqueeze(1)
+        if E_t.dim() == 2:
+            # (B, n_drives) -> (B, 1, n_drives), broadcast over positions.
+            E_t = E_t.unsqueeze(1)
+        assert E_t.dim() == 3, f"per-position state must be (B,T,n_drives), got {tuple(E_t.shape)}"
+        T_x, T_e = x.size(1), E_t.size(1)
+        assert T_x == T_e, (
+            f"modulate(): hidden has {T_x} positions but state has {T_e}; "
+            f"they must be aligned along dim 1"
+        )
+        scale = 1.0 + self.film_scale(E_t)  # (B, T, d_model)
+        shift = self.film_shift(E_t)        # (B, T, d_model)
+        return x * scale + shift
 
     # -- token-level prediction error --------------------------------------
     def prediction_error_from_logits(self, logits, targets) -> torch.Tensor:
@@ -335,8 +360,10 @@ class GPTWithRDA(nn.Module):
     what feeds `event_proj` / `update()`, because the state may only react to
     what actually happened.
 
-    forward returns (logits, E_next, dpe). `dpe` is NOT
-    consumed for anything in this step.
+    Returns a dict including "E_next" for the caller to carry forward, UNLESS
+    targets is None, in which case a bare (B, T, vocab) logits TENSOR is
+    returned so the generation path can treat this wrapper as a drop-in GPT.
+    `dpe` is NOT consumed for anything in this step.
     """
 
     def __init__(self, base_model, n_drives: int = N_DRIVES, decay: float = 0.95,
@@ -353,6 +380,10 @@ class GPTWithRDA(nn.Module):
         self._debug_count = 0
         # Records the last leakage-check result so a caller can audit it.
         self.last_leakage_check = None
+        # Final state of the most recent forward(). During generation this is
+        # the value the Engine must feed back in as E_t_external on the next
+        # step, so T=1 decoding continues the same recurrence.
+        self.last_state = None
 
     # -- leakage guard ------------------------------------------------------
     def _assert_no_temporal_leakage(self, pre_outcome_hidden, pooled_post_outcome):
@@ -381,6 +412,18 @@ class GPTWithRDA(nn.Module):
         # are the SAME underlying slice (both are hidden[:, t]) and would always
         # compare equal. The adjacent-but-distinct pair is pre[:, t] vs
         # post[:, t], i.e. hidden[:, t] vs hidden[:, t+1].
+        if pre_outcome_hidden.size(1) == 0:
+            # Single-token decode (T == 1): there is no pre/post pair to
+            # compare, so there is nothing that could leak. The two slices are
+            # both empty, hence trivially non-identical in content. This case
+            # became reachable once T=1 generation was wired up.
+            self.last_leakage_check = {
+                "distinct_ptr": bool(distinct_ptr),
+                "not_elementwise_equal": True,
+                "skipped_single_token_decode": True,
+            }
+            return
+
         b = min(pre_outcome_hidden.size(0), 2)
         last = pre_outcome_hidden.size(1) - 1
         t = max(0, last // 2)
@@ -540,6 +583,7 @@ class GPTWithRDA(nn.Module):
                 B, pre_outcome_hidden.size(1), device=device, dtype=E_t.dtype
             )
 
+        E_start = E_t
         step_E, step_Ehat = [], []
         for t in range(pre_outcome_hidden.size(1)):
             h_t = pre_outcome_hidden[:, t, :]
@@ -552,28 +596,89 @@ class GPTWithRDA(nn.Module):
             step_Ehat.append(E_hat_next)
             E_t = E_next
 
-        E_next_seq = torch.stack(step_E, dim=1)      # (B, T-1, n_drives)
-        E_hat_seq = torch.stack(step_Ehat, dim=1)   # (B, T-1, n_drives)
-        dpe = drive_prediction_error(E_next_seq, E_hat_seq)
+        if step_E:
+            E_next_seq = torch.stack(step_E, dim=1)    # (B, T-1, n_drives)
+            E_hat_seq = torch.stack(step_Ehat, dim=1)  # (B, T-1, n_drives)
+            dpe = drive_prediction_error(E_next_seq, E_hat_seq)
+        else:
+            # SINGLE-TOKEN DECODE (T == 1 with a KV cache).
+            #
+            # pre_outcome_hidden is empty, so the loop above never ran and the
+            # state would sit frozen for the whole generation -- measured: the
+            # state norm stayed at its prefill value across every decode step.
+            #
+            # But there IS a hidden state to consume: hidden[:, 0] is the state
+            # produced by decoding the newest token. The only thing missing
+            # versus training is the prediction error, because the next token
+            # does not exist yet; that is passed as 0, which is exactly the
+            # neutral value the PE pathway uses everywhere.
+            #
+            # FiLM still uses E_start (the state BEFORE this update), so the
+            # token just decoded is never modulated by its own update.
+            h_new = hidden[:, 0, :]                    # (B, d_model)
+            E_next = self.state.update(E_t, h_new, torch.zeros(B, device=device, dtype=E_t.dtype))
+            E_next_seq = E_next.new_zeros(B, 0, self.n_drives)
+            E_hat_seq = E_next_seq
+            dpe = E_next_seq
+            E_t = E_next
+
+        # ------------------------------------------------------------------
+        # PER-POSITION CAUSAL FiLM INPUT.
+        #
+        # Position p is modulated by E_start for p == 0 and by E_next_seq[p-1]
+        # for p >= 1 -- i.e. by the state as it stood BEFORE the update that
+        # consumed position p.
+        #
+        # The tempting alternative, E_next_seq[p], is WRONG, and not by a small
+        # margin. E_next_seq[p] is built from pe_seq[:, p], and pe_seq[:, p] is
+        # the prediction error of the MODEL'S OWN PROBABILITY FOR TOKEN p+1
+        # against targets[p+1]. So E_next_seq[p] depends on token p+1, and
+        # modulating position p with it lets position p's hidden state -- and
+        # therefore the logits that predict token p+1 -- depend on token p+1.
+        # That is a one-token lookahead leak, and it inflates val loss, because
+        # at eval time that token does not exist yet.
+        #
+        # E_next_seq[p-1] depends on pe_seq[:, p-1], which depends on token p --
+        # a token position p has already consumed. Strictly causal.
+        # ------------------------------------------------------------------
+        film_state = torch.cat([E_start.unsqueeze(1), E_next_seq], dim=1)  # (B, T, n_drives)
+        assert film_state.size(1) == hidden.size(1), (
+            f"film_state has {film_state.size(1)} positions but hidden has "
+            f"{hidden.size(1)}"
+        )
 
         # Mean over positions for a compact (B, n_drives) summary signal.
-        dpe_mean = dpe.mean(dim=1)
-        E_next_mean = E_next_seq.mean(dim=1)
-        E_hat_mean = E_hat_seq.mean(dim=1)
+        # In single-token decode these sequences are empty, and the mean of an
+        # empty tensor is NaN, which would silently poison the debug log and any
+        # caller reading "dpe". Fall back to zeros.
+        if dpe.size(1) == 0:
+            dpe_mean = dpe.new_zeros(B, self.n_drives)
+            E_next_mean = dpe.new_zeros(B, self.n_drives)
+            E_hat_mean = dpe.new_zeros(B, self.n_drives)
+        else:
+            dpe_mean = dpe.mean(dim=1)
+            E_next_mean = E_next_seq.mean(dim=1)
+            E_hat_mean = E_hat_seq.mean(dim=1)
 
-        # The returned E_next is the final state of the sequence.
-        E_next_final = E_next
+        # The returned E_next is the final state of the sequence. In the
+        # training branch `E_t` has been rebound to the last update, and in the
+        # single-token branch it was explicitly advanced, so E_t is correct in
+        # both cases. E_start is the state that entered the step, which is what
+        # the debug log wants.
+        E_next_final = E_t
 
         # Document starts are reported, never acted on (decay-only persistence).
         n_doc_starts = 0 if doc_starts is None else int(doc_starts.sum().item())
 
         if self.training:
-            # Log E_t (the state actually entering this step) rather than the
-            # loop variable, which by now aliases the final state.
-            self._log_debug(E_t, E_hat_mean, E_next_final, dpe_mean,
+            # Log E_start (the state actually entering this step) rather than
+            # the loop variable, which by now aliases the final state.
+            self._log_debug(E_start, E_hat_mean, E_next_final, dpe_mean,
                             mode=mode, doc_starts_this_step=n_doc_starts)
 
-        logits = _logits_from_hidden(self.base, hidden) if targets is None else None
+        # NOTE: logits are computed below from the FiLM-MODULATED hidden states.
+        # The base forward already returned a loss from the UNMODULATED states,
+        # so those logits are deliberately discarded and recomputed here.
 
         # ------------------------------------------------------------------
         # FiLM modulation: make the affective state actually condition the
@@ -589,8 +694,11 @@ class GPTWithRDA(nn.Module):
         # NOTE: `dpe` is still NOT consumed. It is computed, returned
         # and logged, and nothing about memory / learning rate / attention is
         # modulated by it. The state influences the model only through FiLM.
+        #
+        # PER-POSITION: film_state is (B, T, n_drives), one state per position,
+        # so position p is modulated only by information from tokens <= p.
         # ------------------------------------------------------------------
-        hidden_mod = self.state.modulate(hidden, E_t)
+        hidden_mod = self.state.modulate(hidden, film_state)
         # Re-apply the LM head + softcap to the modulated hidden states.
         lm_logits = self.base.lm_head(hidden_mod)
         lm_logits = lm_logits[..., :self.base.config.vocab_size].float()
@@ -615,11 +723,20 @@ class GPTWithRDA(nn.Module):
                 reduction=loss_reduction,
             )
         else:
-            logits = lm_logits
+            # INFERENCE / GENERATION PATH. nanochat's Engine calls
+            #     model.forward(ids, kv_cache=...)  and then indexes the result
+            #     as a tensor: logits[:, -1, :]
+            # so when there are no targets this MUST return a bare (B, T, V)
+            # tensor, not a dict. Returning a dict here was a hard interface
+            # break that made RDA models undecodable. Returning a tensor keeps
+            # this wrapper a drop-in for GPT in the generation path, and the
+            # caller can read the state off the model via `last_state`.
+            self.last_state = E_next_final
+            self.last_mode = mode
+            return lm_logits
 
         return {
             "loss": loss,
-            "logits": logits,
             "E_next": E_next_final,
             "dpe": dpe_mean,
             "dpe_seq": dpe,
