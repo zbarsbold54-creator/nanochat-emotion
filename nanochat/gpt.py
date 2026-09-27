@@ -456,7 +456,15 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False):
+        """
+        return_hidden=False (the default, used everywhere else): the return value
+        and all numerics are exactly as before.
+
+        return_hidden=True: additionally return the pre-LM-head hidden states
+        of shape (B, T, d_model). Only the RDA experiment needs this;
+        the normal training / eval path never sets it and is untouched.
+        """
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -508,6 +516,10 @@ class GPT(nn.Module):
         x = norm(x)
 
         # Forward the lm_head (compute logits)
+        # `x` here is the pre-LM-head hidden state, i.e. exactly the signal the
+        # RDA module consumes. Capture it BEFORE the head when asked.
+        hidden = x if return_hidden else None
+
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
         logits = logits[..., :self.config.vocab_size] # slice to remove padding
@@ -518,10 +530,10 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
-            return loss
+            return (loss, hidden) if return_hidden else loss
         else:
             # inference: just return the logits directly
-            return logits
+            return (logits, hidden) if return_hidden else logits
 
     @torch.inference_mode()
     def generate(self, tokens, max_tokens, temperature=1.0, top_k=None, seed=42):

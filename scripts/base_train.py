@@ -12,6 +12,7 @@ python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 -
 """
 
 import os
+import sys
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import gc
 import json
@@ -77,7 +78,30 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+# Regulatory Drive Architecture / RDA (opt-in; off = original training path, unchanged)
+parser.add_argument("--rda", action="store_true",
+                    help="wrap the model in GPTWithRDA and carry regulatory drive state across micro-steps within an episode")
+parser.add_argument("--rda-debug-steps", type=int, default=200,
+                    help="number of steps to log E_t / E_hat_next / E_next / dpe norms")
+parser.add_argument("--rda-drive-wd", type=float, default=0.01,
+                    help="weight decay on event_proj/pe_proj only, bounding drive magnitude. "
+                         "Independent of pe_reference_scale (which is input-side).")
+# DEPRECATED ALIASES. The project was renamed from "primal state" to
+# "Regulatory Drive Architecture"; these keep older run scripts and notes
+# working instead of failing with an opaque "unrecognized arguments" error.
+parser.add_argument("--primal-state", dest="rda", action="store_true",
+                    help=argparse.SUPPRESS)
+parser.add_argument("--primal-debug-steps", dest="rda_debug_steps", type=int,
+                    default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
+                    default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 args = parser.parse_args()
+_deprecated = [f for f in ("--primal-state", "--primal-debug-steps",
+                            "--primal-drive-wd") if f in sys.argv]
+if _deprecated:
+    # print0 is not imported this early in the file, so warn on stderr.
+    print("WARNING: " + ", ".join(_deprecated) + " is deprecated; use the --rda* "
+          "names instead. Mapping to the new flags.", file=sys.stderr)
 user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
@@ -420,6 +444,161 @@ print0(f"Tokens / micro-batch / rank: {args.device_batch_size} x {args.max_seq_l
 print0(f"Tokens / micro-batch: {world_tokens_per_fwdbwd:,}")
 print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
 
+# --------------------------------------------------------------------------------
+# Affective / regulatory drive state wiring (opt-in via --RDA)
+#
+# Off by default: with the flag absent the training loop below is byte-for-byte
+# the original `loss = model(x, y)` path and no RDA module is built.
+#
+# When enabled, GPTWithRDA wraps the base model and uses DECAY-ONLY
+# PERSISTENCE: the affective state is carried across every training step and is
+# never hard-reset at a document boundary. `rda_carry_state` is None only
+# until the first step produces a state (i.e. step 0 uses E_init exactly once).
+# RDAStateModule's `decay` is the sole mechanism controlling how much prior
+# state survives into a new document.
+rda_active = args.rda
+rda_carry_state = None
+rda_carry_counts = {"carry": 0, "reset": 0}
+rda_doc_start_counts = []
+# FiLM movement tracking. If these stay near zero the regulatory drive state never
+# actually influences the model and any A/B difference is not a test of the
+# hypothesis. Sampled at a few milestones rather than every step.
+rda_film_checkpoints = {0, 150, 300, 450, 600}
+rda_film_log = []
+
+if rda_active:
+    from nanochat.rda import GPTWithRDA, document_start_mask
+    bos_token_id = tokenizer.get_bos_token_id()
+    # Wrap the base model. The state module and predictor need real gradients,
+    # so they stay in eager mode.
+    rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps)
+    rda_model = rda_model.to(device)
+    model = rda_model
+    print0(f"RDA ENABLED | n_drives=8 | decay=0.95 | persistence=decay-only | debug_steps={args.rda_debug_steps}")
+
+    # ---------------------------------------------------------------------
+    # Optimizer coverage for the RDA parameters.
+    #
+    # GPT.setup_optimizer only enumerates the BASE model's parameters, and
+    # asserts its own groups sum to len(self.parameters()) -- so the wrapper's
+    # state.* / predictor.* parameters were silently left unoptimized and FiLM
+    # stayed exactly 0.0 for the whole run. Enroll them here.
+    #
+    # HYPERPARAMETERS (deliberately reusing the base scheme, not inventing one):
+    #   film_* are Linear MATRIX weights, so they follow the matrix path's LR
+    #   (args.matrix_lr * batch_lr_scale) with NO weight decay -- they start at
+    #   exactly 0 and are meant to grow freely. event_proj / pe_proj follow the
+    #   same LR but get their own small weight decay (see below). All are
+    #   routed through AdamW (kind='adamw') rather than Muon because Muon is
+    #   shape-bucketed across the base trunk and mixing these 8-wide state
+    #   layers in would perturb the base model's own groups. e_init is a
+    #   vector, so it follows the scalar LR (args.scalar_lr * batch_lr_scale)
+    #   with the x0-style zero decay.
+    # ---------------------------------------------------------------------
+    # FiLM only -- the conditioning path. The drive projections are split out
+    # below into their own weight-decayed group.
+    _state_matrix = (list(rda_model.state.film_scale.parameters())
+                     + list(rda_model.state.film_shift.parameters()))
+    _state_vector = [rda_model.state.e_init]
+    _predictor_matrix = list(rda_model.predictor.parameters())
+
+    # event_proj / pe_proj get their OWN group with an explicit, small weight
+    # decay (--rda-drive-wd, default 0.01), separate from every other group.
+    #
+    # WHY A SEPARATE GROUP RATHER THAN MORE INPUT SCALING. The drive is
+    #     drive = tanh( event_proj(h) + pe_proj(pe / pe_reference_scale) )
+    # and the recurrence pins a dimension at a rail once |drive| exceeds
+    # atanh(0.99) = 2.6467. Measured over 30 fresh steps, event_proj outputs
+    # already sit at mean |.| = 2.11 and reach 4.11, while pe_proj sits at
+    # 0.85 -- so event_proj alone is past the threshold 26 of those 30 steps,
+    # and the state ratchets to |E| = sqrt(8) within ~130 steps.
+    #
+    # Shrinking pe_reference_scale would tune an INPUT magnitude and leave
+    # event_proj(h) -- which depends on the learned hidden state h, not on the
+    # PE normalization at all -- free to grow without bound. Decaying the
+    # weights themselves constrains the magnitude directly and independently of
+    # how large h happens to be. These are two different levers; this is the
+    # weight-side one, and it is deliberately separate from pe_reference_scale
+    # so a future input-side change cannot silently undo it.
+    # ---------------------------------------------------------------------
+    # h_norm (LayerNorm in front of event_proj) must be enrolled too, or the
+    # coverage assertion below raises: it is a state.* parameter and would
+    # otherwise silently never update. It goes in the drive group so it
+    # inherits the same LR and weight decay as the projection it feeds.
+    _drive_matrix = (list(rda_model.state.event_proj.parameters())
+                     + list(rda_model.state.pe_proj.parameters())
+                     + list(rda_model.state.h_norm.parameters()))
+
+    _dmodel_lr_scale = (model_config_kwargs["n_embd"] / 768) ** -0.5
+    # NOTE: the training loop rescales every group as
+    #   group["lr"] = group["initial_lr"] * lrm
+    # so each group added here MUST carry its own initial_lr or the very first
+    # step raises KeyError("initial_lr"). GPT.setup_optimizer() sets this field
+    # on its own groups; groups added afterwards do not inherit it.
+    _rda_groups = [
+        # FiLM: conditioning path. No weight decay -- these start at exactly 0
+        # and are meant to grow freely into whatever scale is useful.
+        dict(kind='adamw', params=_state_matrix,
+             lr=args.matrix_lr * batch_lr_scale,
+             betas=(0.9, 0.95), eps=1e-10, weight_decay=0.0),
+        # Drive: magnitude-bounded by explicit weight decay (see above).
+        dict(kind='adamw', params=_drive_matrix,
+             lr=args.matrix_lr * batch_lr_scale,
+             betas=(0.9, 0.95), eps=1e-10, weight_decay=args.rda_drive_wd),
+        dict(kind='adamw', params=_state_vector,
+             lr=args.scalar_lr * batch_lr_scale,
+             betas=(0.96, 0.95), eps=1e-10, weight_decay=0.0),
+        dict(kind='adamw', params=_predictor_matrix,
+             lr=args.matrix_lr * batch_lr_scale,
+             betas=(0.9, 0.95), eps=1e-10, weight_decay=0.0),
+    ]
+    for _pg in _rda_groups:
+        _pg["initial_lr"] = _pg["lr"]
+        optimizer.add_param_group(_pg)
+
+    # ---- coverage assertion BY NAME (in addition to the count assert) ----
+    _covered = {id(p) for g in optimizer.param_groups for p in g["params"]}
+    _missing = [n for n, p in rda_model.named_parameters()
+                if n.startswith("state.") or n.startswith("predictor.")
+                if id(p) not in _covered]
+    if _missing:
+        raise RuntimeError(
+            "OPTIMIZER COVERAGE GAP: these RDA parameters are in no "
+            f"optimizer param group and would never update: {_missing}"
+        )
+
+    # ---- skip-list for params that legitimately receive NO gradient -------
+    #
+    # MuonAdamW._compute_adamw calls grad.float() unconditionally, so a param
+    # with grad=None crashes the step. Two RDA params are genuinely
+    # grad-free:
+    #   state.e_init        - only read via init_state(); with decay-only
+    #                         persistence it is used once at step 0, and
+    #                         modulate() is the identity when E_t == 0, so the
+    #                         loss has no gradient path to it.
+    #   predictor.*         - dpe is computed and logged but NOT
+    #                         consumed (out of scope by design), so nothing in
+    #                         the loss depends on the predictor.
+    # They are still ENROLLED (so coverage holds and they update if that ever
+    # changes) but carry weight_decay=0 and get a zero grad each backward, so
+    # the step is a no-op on them until something in the loss actually
+    # consumes them.
+    _grad_free = {id(rda_model.state.e_init)} | {
+        id(p) for p in rda_model.predictor.parameters()}
+    for _g in optimizer.param_groups:
+        if any(id(p) in _grad_free for p in _g["params"]):
+            _g["grad_free"] = True
+
+    # NOTE: nn.Module.parameters() is a generator, so it needs len(list(...)).
+    print0(f"RDA optimizer coverage: {len(list(rda_model.state.parameters()))} state + "
+           f"{len(list(rda_model.predictor.parameters()))} predictor params enrolled "
+           f"({len(_state_matrix) + len(_drive_matrix) + len(_state_vector) + len(_predictor_matrix)} tensors); "
+           f"weight decay {args.rda_drive_wd} on event_proj/pe_proj; "
+           f"{len(_grad_free)} grad-free by design (e_init, predictor.*)")
+else:
+    rda_model = None
+
+
 # Go!
 while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
@@ -483,14 +662,23 @@ while True:
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != args.resume_from_step and args.save_every > 0 and step % args.save_every == 0):
+        # When the regulatory drive state is active, the module and predictor live on the
+        # GPTWithRDA wrapper, NOT on orig_model, so orig_model.state_dict()
+        # alone would silently drop them and reloading would yield a randomly
+        # re-initialised state. Save the wrapper's full state dict instead, which
+        # covers the base trunk (keys prefixed "base.") plus state.* / predictor.*.
+        model_state = (rda_model.state_dict() if rda_active
+                       else orig_model.state_dict())
         save_checkpoint(
             checkpoint_dir,
             step,
-            orig_model.state_dict(), # model parameters
+            model_state, # model parameters (includes RDA module when enabled)
             optimizer.state_dict(), # optimizer state
             { # metadata saved as json
                 "step": step,
                 "val_bpb": val_bpb, # loss at last step
+                "rda": rda_active, # so loaders know the key layout
+                "rda_film_log": rda_film_log, # FiLM weight movement trace
                 "model_config": model_config_kwargs,
                 "user_config": user_config, # inputs to the training script
                 "device_batch_size": args.device_batch_size,
@@ -516,14 +704,57 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
-        loss = model(x, y)
+        if rda_active:
+            # DECAY-ONLY PERSISTENCE. The state is never hard-reset at a
+            # document boundary: `rda_carry_state` stays None only until the
+            # first step produces a state, and from then on every step carries
+            # the previous E_next forward. The `decay` inside
+            # RDAStateModule.update() is the only mechanism governing how
+            # much prior state survives into a new document. Document starts
+            # are counted and logged so a carry that crossed a boundary is
+            # distinguishable from one that stayed within a document.
+            doc_starts = document_start_mask(x, bos_token_id)
+            out = model(x, y, E_t_external=rda_carry_state, doc_starts=doc_starts)
+            loss = out["loss"]
+            rda_carry_state = out["E_next"].detach()
+            rda_carry_counts[out["mode"]] = rda_carry_counts.get(out["mode"], 0) + 1
+            rda_doc_start_counts.append(out["n_doc_starts"])
+        else:
+            loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
             loss.backward()
+            # MuonAdamW requires a grad on every enrolled param. The RDA
+            # e_init and predictor.* are grad-free by design (nothing in the
+            # loss depends on them), so give them an explicit zero grad rather
+            # than letting the step crash. This must be re-done on EVERY
+            # backward: model.zero_grad(set_to_none=True) runs after each
+            # optimizer.step(), so the grads are None again by the next
+            # micro-step. Priming only once would survive step 0 and then
+            # crash on step 1.
+            for _g in optimizer.param_groups:
+                if _g.get("grad_free"):
+                    for _p in _g["params"]:
+                        if _p.grad is None:
+                            _p.grad = torch.zeros_like(_p)
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+    # FiLM trace. This MUST sit outside the micro-step loop: `step` is constant
+    # across all grad_accum_steps micro-steps, so logging inside recorded the
+    # same pre-optimizer-step weights once per micro-step (8 duplicate entries
+    # per checkpoint, all identical). Reading it here gives the weights after
+    # opt.step(), which is what "is FiLM training?" actually means.
+    if rda_active and step in rda_film_checkpoints:
+        fs = float(rda_model.state.film_scale.weight.detach().abs().mean())
+        fh = float(rda_model.state.film_shift.weight.detach().abs().mean())
+        rda_film_log.append({"step": step,
+                                "to_scale_w_absmean": fs,
+                                "to_shift_w_absmean": fh})
+        print0(f"[rda] FILM step={step} "
+               f"to_scale.weight.abs().mean()={fs:.6e} "
+               f"to_shift.weight.abs().mean()={fh:.6e}")
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)
