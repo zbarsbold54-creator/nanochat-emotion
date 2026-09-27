@@ -8,7 +8,8 @@ This is a fork of Karpathy's **nanochat** — the simplest experimental harness 
 LLMs, designed to run on a single GPU node with minimal, hackable code. Everything in this
 repo about tokenization, pretraining, evaluation and the model/inference stack is nanochat's
 and is credited to [karpathy/nanochat](https://github.com/karpathy/nanochat). The RDA work is
-an addition on top of that base, on the `experiment-affective-state` branch.
+an addition on top of that base. The original FineWeb-Edu baseline is preserved at tag
+`baseline-fineweb-edu-208m` for comparison against trained runs.
 
 ## The idea
 
@@ -131,6 +132,66 @@ python eval/compare_recall.py            # anomaly-recall comparison vs baseline
 python smoke_rda.py                      # optimizer-coverage / gradient smoke test
 ```
 
+## Credits
+
+nanochat is the work of [Andrej Karpathy](https://github.com/karpathy) and contributors;
+see [karpathy/nanochat](https://github.com/karpathy/nanochat). This fork exists to experiment
+on top of it, and the RDA additions are not part of nanochat.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    TOK[/"Token Sequence"/] --> TRUNK["Transformer Trunk"]
+    TRUNK --> HID["Hidden States"]
+
+    subgraph RDA["Regulatory Drive State"]
+        direction TB
+        HID --> PED["PE Drive"]
+        HID --> EVD["Event Drive"]
+        PED --> GATE{{"Gated Update"}}
+        EVD --> GATE
+        ET[(("Drive State Et"))] -.->|"carries over"| GATE
+        GATE --> ET
+        ET --> FILM{{"FiLM Modulation"}}
+        HID --> FILM
+    end
+
+    GATE --> PRED["State Predictor"]
+    PRED --> PNX["Predicted Next State"]
+    PNX --> CMP{{"Compare"}}
+    GATE -.->|"not yet consumed"| CMP
+    CMP --> DPE[/"Drive Prediction Error"/]
+
+    FILM --> LMH["LM Head"]
+    LMH --> LOG[/"Next-token Logits"/]
+    DPE -.-> LOG
+
+    LOG -.->|"token loss"| PED
+
+    classDef unconsumed stroke-dasharray: 5 5,opacity:.75;
+    class PRED,PNX,CMP,DPE unconsumed;
+```
+
+The diagram above is the whole forward pass. Reading it left to right:
+
+- **Token sequence → Transformer trunk → Hidden states.** The RDA module reads the
+  pre-outcome hidden state at each position; it does not modify the trunk.
+- **PE Drive** takes the token-level prediction error. **Event Drive** takes the normalised
+  hidden state. Both feed the **Gated Update**, which mixes the incoming `Drive State Et`
+  with the new drive — `E_{t+1} = decay·E_t + (1-decay)·tanh(·)`.
+- **FiLM Modulation** is the only path by which the state affects the model. It modulates
+  the residual stream before the **LM Head** produces next-token logits.
+- **Prediction-Error Pathway (dashed, Not Yet Consumed).** The state predictor tries to
+  forecast the next drive state, and the **Drive Prediction Error** is the difference. It is
+  computed and logged, but nothing consumes it — so the predictor currently receives no
+  gradient. This is the next thing to wire up.
+
+The same diagram lives in [`dev/rda_architecture.mmd`](dev/rda_architecture.mmd) if you want
+to render it elsewhere.
+
 ## Layout
 
 | path | what |
@@ -141,11 +202,8 @@ python smoke_rda.py                      # optimizer-coverage / gradient smoke t
 | `eval/compare_recall.py` | anomaly-recall A/B harness |
 | `eval/build_anomaly_set.py` | synthetic anomaly set generator |
 | `smoke_rda.py` | optimizer coverage + gradient smoke test |
-| `diagnose_saturation.py` | drive-saturation tripwire diagnostic |
+| `smoke_saturation.py` | drive-saturation gate, 30/60-step |
+| `diagnose_saturation.py` | 200-step tripwire + fixed-point gap analysis |
 | `probe_drives.py` | separates the event and prediction-error drive terms |
-
-## Credits
-
-nanochat is the work of [Andrej Karpathy](https://github.com/karpathy) and contributors;
-see [karpathy/nanochat](https://github.com/karpathy/nanochat). This fork exists to experiment
-on top of it, and the RDA additions are not part of nanochat.
+| `check_hnorm.py` | LayerNorm scale-invariance check |
+| `analyze_loss_slope.py` | loss-vs-saturation analysis |
