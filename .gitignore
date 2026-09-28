@@ -12,6 +12,10 @@ logs/
 eval/eval_anomaly_set.jsonl
 eval/recall_comparison.json
 
+# Local run driver. Regenerated per sweep and specific to one machine's GPU
+# timing, so it is a working script rather than source.
+run_sweep.ps1
+
 # Secrets
 .env
 
