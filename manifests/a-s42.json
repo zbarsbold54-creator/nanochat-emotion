@@ -1,14 +1,16 @@
 {
   "label": "a-s42",
-  "written_utc": "2026-09-28T09:51:39Z",
+  "written_utc": "2026-09-28T11:09:49Z",
   "argv": [
     "diagnostics\\write_manifest.py",
     "--label",
     "a-s42",
     "--seed",
-    "42"
+    "42",
+    "--num-iterations",
+    "600"
   ],
-  "argv_full_command_line": "diagnostics\\write_manifest.py --label a-s42 --seed 42",
+  "argv_full_command_line": "diagnostics\\write_manifest.py --label a-s42 --seed 42 --num-iterations 600",
   "cwd": "C:\\AI\\nanochat",
   "python": "3.10.21 (main, Sep  1 2026, 14:14:55) [MSC v.1944 64 bit (AMD64)]",
   "platform": "Windows-10-10.0.26200-SP0",
@@ -19,10 +21,12 @@
     "device_batch_size": 4,
     "total_batch_size": 32768
   },
-  "git_commit": "6ee7cf67b26bd5833059ce4c1e0a18acb0f220a5",
+  "git_commit": "030a384bdcc28e155aa0fb16fef2019a818bbe43",
   "git_branch": "master",
-  "git_status_porcelain": "M nanochat/common.py\n M nanochat/rda.py\n M scripts/base_train.py\n?? diagnostics/verify_vectorized_update.py\n?? diagnostics/write_manifest.py\n?? manifests/",
-  "git_diff_stat": "nanochat/common.py    |  19 ++++-\n nanochat/rda.py       | 201 ++++++++++++++++++++++++++++++++++++++++++++++----\n scripts/base_train.py |  60 ++++++++++++++-\n 3 files changed, 260 insertions(+), 20 deletions(-)",
+  "git_clean": true,
+  "git_diff_sha256": "a33c7bed54fb7a24557e37f2164d3855dc1f98ae9de8ef78541dfd2dd9c9ca73",
+  "git_status_porcelain": "",
+  "git_diff_stat": "",
   "gpu": "NVIDIA GeForce RTX 5060 Ti",
   "note": "",
   "data": {

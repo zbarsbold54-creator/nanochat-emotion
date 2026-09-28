@@ -124,8 +124,14 @@ def _tree_state():
             return "ERROR: %s" % e
     import hashlib
     st = g("status", "--porcelain")
+    # Ignore manifests/: the run driver writes this run's OWN manifest a
+    # moment before training starts, so listing it would make every run
+    # report DIRTY and train the reader to ignore the line. Only tracked
+    # SOURCE should decide whether this run executed the committed code.
+    st = "\n".join(l for l in st.splitlines() if "manifests/" not in l)
     h = hashlib.sha256()
     h.update(g("diff", "HEAD").encode())
+    h.update(b"\n--MANIFESTS-EXCLUDED--\n")
     return st, h.hexdigest()
 
 _status, _diff_sha = _tree_state()
