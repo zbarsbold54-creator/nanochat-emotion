@@ -619,6 +619,31 @@ if rda_active:
         _pg["initial_lr"] = _pg["lr"]
         optimizer.add_param_group(_pg)
 
+    # ---- DIAGNOSTIC-ONLY HOOKS (env-gated, inert by default) -------------
+    # RDA_DIAG=<step> logs the per-drive decomposition at each of those
+    # optimizer steps, so the drive trajectory can be attributed to either
+    # the INITIALIZATION or the GRADIENT.
+    # RDA_DISABLE_SAT=1 suppresses the saturation abort so a short
+    # diagnostic run can continue past the rail.
+    _rda_diag_steps = set()
+    _rda_diag_prev = {}
+    if os.environ.get("RDA_DIAG"):
+        _rda_diag_steps = {int(s) for s in os.environ["RDA_DIAG"].split(",")}
+        print0("DIAG: logging per-drive decomposition at steps %s"
+               % sorted(_rda_diag_steps))
+    if os.environ.get("RDA_DISABLE_SAT"):
+        rda_sat_abort_steps = 10 ** 9   # effectively never
+        print0("DIAG: saturation abort DISABLED (RDA_DISABLE_SAT)")
+    # RDA_STATE_LR=<f> scales the learning rate of every state.* group.
+    # Applied as a MULTIPLIER inside the per-step rescale
+    # (`group["lr"] = initial_lr * lrm * _rda_diag_lr_scale`) rather than by
+    # editing initial_lr, so it composes correctly with lrm and survives
+    # every step. 1.0 (the default) is exactly the old behaviour.
+    _rda_diag_lr_scale = 1.0
+    if os.environ.get("RDA_STATE_LR"):
+        _rda_diag_lr_scale = float(os.environ["RDA_STATE_LR"])
+        print0("DIAG: state.* group lr multiplier = %g" % _rda_diag_lr_scale)
+
     # ---- coverage assertion BY NAME (in addition to the count assert) ----
     _covered = {id(p) for g in optimizer.param_groups for p in g["params"]}
     _missing = [n for n, p in rda_model.named_parameters()
@@ -875,7 +900,7 @@ while True:
     muon_momentum = get_muon_momentum(step)
     muon_weight_decay = get_weight_decay(step)
     for group in optimizer.param_groups:
-        group["lr"] = group["initial_lr"] * lrm
+        group["lr"] = group["initial_lr"] * lrm * _rda_diag_lr_scale
         if group['kind'] == 'muon':
             group["momentum"] = muon_momentum
             group["weight_decay"] = muon_weight_decay
@@ -892,6 +917,54 @@ while True:
     else:
         optimizer.step()
     model.zero_grad(set_to_none=True)
+
+    # ---- DIAGNOSTIC: per-drive decomposition (env-gated, inert unless
+    # RDA_DIAG lists this step). Answers whether the climb is init or grad.
+    if rda_active and step in _rda_diag_steps:
+        with torch.no_grad():
+            E_seq = getattr(model, "_last_E_next_seq", None)
+            pe_proj = rda_model.state.pe_proj
+            W = pe_proj.weight.detach().flatten().cpu()
+            B = pe_proj.bias.detach().cpu()
+            # lr actually applied to each state.* group, AFTER lrm
+            lrs = []
+            for _pg in _rda_groups:
+                _nms = {n for n, p in rda_model.named_parameters()
+                        if any(p is q for q in _pg["params"])
+                        and n.startswith("state.")}
+                if _nms:
+                    lrs.append((min(_nms), _pg["lr"]))
+            if E_seq is not None:
+                h = out["hidden"][:, :-1, :].to(rda_model.state.event_proj.weight.dtype)
+                ev = (rda_model.state.event_drive_scale
+                      * rda_model.state.event_proj(rda_model.state.h_norm(h)))[0]
+                lg = rda_model.base.lm_head(out["hidden"][:, :-1, :])[
+                    ..., :rda_model.base.config.vocab_size].float()
+                lg = 15 * torch.tanh(lg / 15)
+                pe_s = rda_model.state.prediction_error_from_logits(lg, y[:, 1:])
+                pv = rda_model.state.pe_proj(
+                    (pe_s / rda_model.state.pe_reference_scale).unsqueeze(-1)
+                    .to(pe_proj.weight.dtype))[0]
+                Efin = E_seq[0].abs().amax(dim=0)
+                # Combine on-device FIRST, then move to cpu once. Calling
+                # .cpu() on pv while ev is still on cuda makes the add fail.
+                tanh_max = torch.tanh(pv + ev).abs().amax(dim=0)
+                pe_m = pv.abs().amax(dim=0).cpu()
+                ev_m = ev.abs().amax(dim=0).cpu()
+                tanh_m = tanh_max.cpu()
+                pv_c, Efin = pv.cpu(), Efin.cpu()
+                for d in range(len(DRIVE_DIMS)):
+                    prev = _rda_diag_prev.get(d)
+                    db = (B[d].item() - prev if prev is not None else 0.0)
+                    print0("DIAG step=%d drive=%d name=%s pe_term=%+.4f "
+                           "event=%+.4f tanh_sum=%+.4f maxE=%.4f "
+                           "w=%+.4f b=%+.4f db=%+.5f"
+                           % (step, d, DRIVE_DIMS[d], pe_m[d].item(),
+                              ev_m[d].item(), tanh_m[d].item(),
+                              Efin[d].item(), W[d].item(), B[d].item(), db))
+                _rda_diag_prev = {d: B[d].item() for d in range(len(DRIVE_DIMS))}
+            for _n, _lr in lrs:
+                print0("DIAG step=%d lr_group[%s]=%.6g" % (step, _n, _lr))
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()

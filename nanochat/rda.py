@@ -36,6 +36,43 @@ N_DRIVES = len(DRIVE_DIMS)
 # -----------------------------------------------------------------------------#
 # RDAStateModule
 # -----------------------------------------------------------------------------#
+def _unit_rms(v, rms: float) -> torch.Tensor:
+    """Rescale each per-position modulation vector to a fixed RMS.
+
+    WHY. FiLM is the only route by which the state can influence the loss, and
+    measured over 250 real steps its gain ran away: |1 + film_scale(E)| grew
+    1.00 -> 2.23 with the base model trainable, and 1.00 -> 9.57 with the base
+    model frozen. Two ablations pin the cause on this term and not on the PE
+    projection:
+
+      - disabling FiLM entirely: the state never crosses |E| = 0.98, even
+        though PE still grows to 19.6. So PE growth is a CONSEQUENCE of FiLM,
+        not its cause.
+      - freezing pe_proj: saturation still occurs, at the same step.
+      - detaching PE's gradient: max|E| and the crossing step are unchanged,
+        so this is not a differentiable-loop pathology either.
+
+    With the base model FROZEN there is no external signal to drive the growth
+    at all -- PE is flat at 10.50 for 250 steps while pe_proj.bias grows
+    1.53 -> 3.71 and the FiLM gain grows 1.00 -> 9.57. A loop that runs with
+    no varying input is self-exciting: the state modulates the residual
+    stream, which changes the state's own future inputs, which modulates
+    harder.
+
+    The fix removes the one degree of freedom that lets the loop amplify
+    itself -- the overall magnitude of the gain -- while keeping the part
+    that carries information, its DIRECTION across the d_model axis. This is
+    a reparameterization, not a clamp: it does not saturate, does not flatten
+    gradients, and never produces a dead zone. The same reasoning as the
+    event-projection normalization, applied at the second place the same
+    pathology appeared.
+
+    At initialization the film weights are exactly zero, so this is 0/eps = 0
+    and modulate() remains the exact identity.
+    """
+    return v / v.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt() * rms
+
+
 class RDAStateModule(nn.Module):
     """An 8-dim affective state with leaky integration and FiLM modulation.
 
@@ -112,6 +149,12 @@ class RDAStateModule(nn.Module):
         # recurrence to warm up from a fixed vector.
         self.e_init = nn.Parameter(torch.zeros(n_drives))
 
+        # RMS budget for each FiLM modulation vector, per position. See
+        # _unit_rms() and modulate() for why the gain is normalized rather
+        # than left free. Fixed and non-learnable, like event_drive_scale, so
+        # it can never be traded off against the loss.
+        self.film_rms = 0.5
+
     # -- recurrence ---------------------------------------------------------
     def init_state(self, batch_size: int, device, dtype=None) -> torch.Tensor:
         """Fresh E_0 for a sequence, shape (batch_size, n_drives)."""
@@ -176,11 +219,42 @@ class RDAStateModule(nn.Module):
         # drive instead of overwhelming it. The reference scale is a property of
         # the NLL definition, not a learned or tuned parameter.
         pe_scaled = pe / self.pe_reference_scale
-        # Event term is LayerNormed and then scaled by a fixed 0.1, so it is
-        # O(0.1) rather than O(1..4). The PE term is left exactly as it was --
-        # measured at mean |.| 0.845, comfortably under the 2.647 pinning
-        # threshold, so it needs no further constraining.
-        event_term = self.event_drive_scale * self.event_proj(self.h_norm(hidden_state))
+        # Event term: LayerNorm(h) then a WEIGHT-NORMALIZED projection.
+        #
+        # WHY THE NORMALIZATION MOVED FROM h TO THE PROJECTION OUTPUT.
+        # LayerNorm(h) was supposed to stop base-model activation growth from
+        # inflating the drive, and it does -- measured over 30 real steps,
+        # LayerNorm output rms stayed at exactly 1.000 and h_norm.weight at
+        # exactly 1.0 for the whole run. It was never the failure.
+        #
+        # The failure is that ||h_norm|| = sqrt(d) = 27.71 is a CEILING, not a
+        # value: event_proj(h) can still reach ||w_row|| * 27.71, and ||w_row||
+        # is LEARNED and UNBOUNDED. Measured, 30 steps, seed 42:
+        #
+        #     event_proj ||W||      1.63 -> 3.51   (x2.15)
+        #     event |max|           0.25 -> 1.26   (x5.03)
+        #     LayerNorm out rms     1.00 -> 1.00   (x1.00)  <- working
+        #
+        # So the drive grew because the PROJECTION grew, not because the input
+        # did. Freezing the entire base model (so h is byte-identical every
+        # step) changed NOTHING: ||W|| still went 1.63 -> 3.51 and event still
+        # reached 1.26. That isolates the cause to the gradient on event_proj
+        # itself, and rules out hidden-state drift and any FiLM feedback loop
+        # as the driver.
+        #
+        # Normalizing the OUTPUT makes the drive depend on the direction of
+        # W*h_norm rather than its magnitude, which is exactly the property
+        # h_norm was introduced to provide -- it just has to be applied where
+        # the magnitude actually is. RMS-normalizing over the drive axis keeps
+        # the learned relative scale BETWEEN drives (the sign and pattern of
+        # the 8 components is the signal; it is preserved exactly) while
+        # removing the one degree of freedom that caused the ratchet.
+        #
+        # This is scale-invariance, not a hard clamp: it does not saturate,
+        # does not flatten gradients, and leaves the tanh argument smooth.
+        ev = self.event_proj(self.h_norm(hidden_state))
+        ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+        event_term = self.event_drive_scale * ev
         drive = torch.tanh(event_term + self.pe_proj(pe_scaled))
         E_prev = E_t.to(drive.dtype)
         # Clamp the incoming state defensively so float drift can never push the
@@ -227,7 +301,14 @@ class RDAStateModule(nn.Module):
         elif pe.dim() == 2:
             pe = pe.unsqueeze(-1)          # (B, T) -> (B, T, 1)
         pe = pe.to(self.pe_proj.weight.dtype)
-        event_term = self.event_drive_scale * self.event_proj(self.h_norm(h))
+        h = self.h_norm(h)
+        ev = self.event_proj(h)
+        # Same output RMS normalization as update() -- see the comment there.
+        # Applying it here too is what keeps the vectorized path and the
+        # reference loop bit-for-bit comparable; if only one of them had it,
+        # every verification test would be measuring two different models.
+        ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+        event_term = self.event_drive_scale * ev
         return torch.tanh(event_term + self.pe_proj(pe / self.pe_reference_scale))
 
     @staticmethod
@@ -417,8 +498,8 @@ class RDAStateModule(nn.Module):
             f"modulate(): hidden has {T_x} positions but state has {T_e}; "
             f"they must be aligned along dim 1"
         )
-        scale = 1.0 + self.film_scale(E_t)  # (B, T, d_model)
-        shift = self.film_shift(E_t)        # (B, T, d_model)
+        scale = 1.0 + _unit_rms(self.film_scale(E_t), self.film_rms)
+        shift = _unit_rms(self.film_shift(E_t), self.film_rms)
         return x * scale + shift
 
     # -- token-level prediction error --------------------------------------
