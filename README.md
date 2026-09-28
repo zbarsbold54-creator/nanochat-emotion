@@ -69,19 +69,46 @@ Not started:
 
 ### Results so far
 
-A depth-8, 768-wide model trained 600 steps on FineWeb-Edu (~19.7M tokens):
+All numbers below are val BPB at step 600 for a depth-8, 768-wide model trained
+600 steps on FineWeb-Edu (~19.7M tokens), using the same flags for every run
+(`--depth=8 --aspect-ratio=96 --head-dim=128 --max-seq-len=1024
+--window-pattern=L --device-batch-size=4 --total-batch-size=32768
+--eval-every=50 --eval-tokens=524288`).
 
-| | val BPB |
+**Baseline (A), three seeds:**
+
+| seed | val BPB |
 |---|---|
-| baseline | 1.300717 |
-| + RDA | **1.286248** |
+| 42 | 1.301217 |
+| 43 | 1.287544 |
+| 44 | 1.295109 |
 
-Being honest about what this does and does not show: the RDA model is a better language
-model on this measure, but that is a general modelling improvement, not evidence of
-anomaly-specific detection. A separate recall harness over a synthetic anomaly set
-(factual contradiction / topic break / token noise) shows differences between the two models
-that are small relative to their per-document variance, so no anomaly-detection claim is
-supported yet.
+mean **1.294623**, spread (max−min) **0.0137**, std ≈ 0.0069.
+
+**The earlier RDA run: 1.286248 — a single seed, and it was leaky.** That
+number was produced by a model whose FiLM pathway had two temporal leaks (the
+state at position 0 was computed from the last token, and the PE pathway gave
+every position a one-token lookahead). Both are fixed in `539007e`; the
+per-position causal FiLM replaced them. More importantly, **1.286248 falls
+inside A's own seed range** (1.287544–1.301217), i.e. it is not distinguishable
+from a baseline draw. The old comparison that reported this as an improvement
+used a single seed on each side.
+
+**RDA does not currently beat the baseline.** An earlier version of this
+README claimed it was "a better language model on this measure". That claim is
+withdrawn: it rested on a single-seed comparison whose margin is smaller than
+the seed-to-seed spread of the control.
+
+**Causal-FiLM B′ has no result yet.** The first B′ attempt aborted at step ~10
+under the saturation rule: the `threat` drive crossed |E| > 0.98 and stayed
+there, meaning the tanh had stopped responding and no later loss number would
+have been attributable to the drive. Fixing that is the current work.
+
+**The recall harness results are single-seed and not conclusive.** The
+per-group differences between A and the old B are small relative to their
+per-document variance, and both were single runs. Treat them as a signal to
+re-test with multiple seeds, not as a finding. The harness has not been re-run
+against the causal-FiLM model.
 
 There is also a structural caveat worth knowing before drawing conclusions from the state
 trajectories: `update()` runs once per token position within a single forward pass, so the
