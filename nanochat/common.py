@@ -171,8 +171,17 @@ def autodetect_device_type():
     print0(f"Autodetected device type: {device_type}")
     return device_type
 
-def compute_init(device_type="cuda"): # cuda|cpu|mps
-    """Basic initialization that we keep doing over and over, so make common."""
+def compute_init(device_type="cuda", seed=42): # cuda|cpu|mps
+    """Basic initialization that we keep doing over and over, so make common.
+
+    seed: default 42, which is the value that was previously hardcoded here.
+    The default is deliberately unchanged so every existing invocation
+    behaves exactly as it did before the parameter existed. Passing a
+    different seed re-initializes the global torch RNG, which is what
+    actually varies between runs: the model weights are drawn during
+    nn.Module construction, and the dataloader uses its own explicit rng
+    objects (see the note below).
+    """
 
     assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
     if device_type == "cuda":
@@ -183,9 +192,11 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     # Reproducibility
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.
     # The only place where global rng might be used is nn.Module initialization of the model weights.
-    torch.manual_seed(42)
+    # So `seed` controls weight initialization. The dataloader derives its own
+    # generators and is NOT reseeded by this value -- see dataloader.py.
+    torch.manual_seed(seed)
     if device_type == "cuda":
-        torch.cuda.manual_seed(42)
+        torch.cuda.manual_seed(seed)
     # skipping full reproducibility for now, possibly investigate slowdown later
     # torch.use_deterministic_algorithms(True)
 

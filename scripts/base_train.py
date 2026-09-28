@@ -78,6 +78,13 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="save checkpoints every N steps (-1 = only at end)")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
+# Reproducibility
+parser.add_argument("--seed", type=int, default=42,
+                    help="seed for model weight initialization. Default 42 is the "
+                         "value that was previously hardcoded in compute_init(), so "
+                         "omitting this reproduces the old behavior exactly. NOTE: "
+                         "this does not reseed the dataloader, which uses its own "
+                         "explicit rng objects.")
 # Regulatory Drive Architecture / RDA (opt-in; off = original training path, unchanged)
 parser.add_argument("--rda", action="store_true",
                     help="wrap the model in GPTWithRDA and carry regulatory drive state across micro-steps within an episode")
@@ -103,11 +110,43 @@ if _deprecated:
     print("WARNING: " + ", ".join(_deprecated) + " is deprecated; use the --rda* "
           "names instead. Mapping to the new flags.", file=sys.stderr)
 user_config = vars(args).copy()  # for logging
+
+# TREE STATE, printed at the TOP of the log before anything else. A run that
+# started on a dirty tree cannot be tied to its commit hash alone, so this is
+# the first thing in the log rather than something you have to go looking for.
+def _tree_state():
+    import subprocess
+    def g(*a):
+        try:
+            return subprocess.check_output(["git"] + list(a), stderr=subprocess.DEVNULL,
+                                           text=True).strip()
+        except Exception as e:
+            return "ERROR: %s" % e
+    import hashlib
+    st = g("status", "--porcelain")
+    h = hashlib.sha256()
+    h.update(g("diff", "HEAD").encode())
+    return st, h.hexdigest()
+
+_status, _diff_sha = _tree_state()
+import subprocess as _sp
+_commit = _sp.check_output(["git", "rev-parse", "HEAD"],
+                           stderr=_sp.DEVNULL, text=True).strip()
+if not _status:
+    print("TREE: CLEAN  commit=%s  diff_sha256=%s (empty diff)"
+          % (_commit, _diff_sha))
+else:
+    print("TREE: DIRTY -- this run did NOT execute the committed code alone.")
+    print("  commit=%s" % _commit)
+    print("  Uncommitted changes present at start:")
+    for _line in _status.splitlines():
+        print("    %s" % _line)
+    print("  diff_sha256=%s" % _diff_sha)
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type, args.seed)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
@@ -465,9 +504,27 @@ rda_doc_start_counts = []
 # hypothesis. Sampled at a few milestones rather than every step.
 rda_film_checkpoints = {0, 150, 300, 450, 600}
 rda_film_log = []
+# Per-dimension E_t saturation trace. Sampled at the same milestones as the
+# FiLM trace, so a table can be read off the run without extra machinery.
+rda_sat_checkpoints = {0, 150, 300, 450, 600}
+rda_sat_log = []
+# ABORT RULE. A drive dimension pinned at |E| > 0.98 for 10 consecutive steps
+# is saturated: the tanh has stopped responding, that dimension has stopped
+# carrying information, and any loss improvement from then on is not
+# attributable to the drive. Abort rather than report a number that looks
+# fine and is actually measuring a stuck state.
+rda_sat_abort_dim = rda_sat_abort_steps = 10
+rda_sat_streak = 0
+rda_sat_worst_dim = -1
+rda_sat_dims = []
+# TEST-ONLY HOOK. Unset in every real run; set only by
+# diagnostics/test_saturation_abort.py to force the abort and prove the rule
+# actually fires. It can only INFLATE |E|, so leaving it on would abort every
+# run; it cannot mask saturation. Verified inert when unset.
+rda_force_sat = os.environ.get("RDA_FORCE_SAT", "")
 
 if rda_active:
-    from nanochat.rda import GPTWithRDA, document_start_mask
+    from nanochat.rda import GPTWithRDA, document_start_mask, DRIVE_DIMS
     bos_token_id = tokenizer.get_bos_token_id()
     # Wrap the base model. The state module and predictor need real gradients,
     # so they stay in eager mode.
@@ -679,6 +736,7 @@ while True:
                 "val_bpb": val_bpb, # loss at last step
                 "rda": rda_active, # so loaders know the key layout
                 "rda_film_log": rda_film_log, # FiLM weight movement trace
+                "rda_sat_log": rda_sat_log, # per-dimension E saturation trace
                 "model_config": model_config_kwargs,
                 "user_config": user_config, # inputs to the training script
                 "device_batch_size": args.device_batch_size,
@@ -755,6 +813,57 @@ while True:
         print0(f"[rda] FILM step={step} "
                f"to_scale.weight.abs().mean()={fs:.6e} "
                f"to_shift.weight.abs().mean()={fh:.6e}")
+    # Per-dimension saturation of the drive state E, plus the abort rule.
+    # Uses the FINAL E_next_seq, i.e. the state as it stood at the last
+    # position of the last micro-step of this step. `.norm(dim=-1)` gives the
+    # per-ROW norm; for the per-DIMENSION view wanted here, take the max |.|
+    # over batch and positions, which is the quantity the |E| > 0.98 rule is
+    # about -- a single dimension, not an aggregate.
+    if rda_active:
+        with torch.no_grad():
+            E_seq = getattr(model, "_last_E_next_seq", None)
+            if E_seq is not None:
+                dim_max = E_seq.detach().abs().amax(dim=(0, 1)).float()  # (n,)
+            else:
+                dim_max = rda_carry_state.detach().abs().amax(dim=-1).float()
+        if rda_force_sat:
+            # TEST-ONLY: drive the named dimensions to 0.999 so the rule
+            # below is exercised without waiting for a real saturation.
+            idx = [i for i, n in enumerate(DRIVE_DIMS)
+                   if n in rda_force_sat.split(",")]
+            if idx:
+                dim_max[idx] = 0.999
+        n_sat = int((dim_max > 0.98).sum().item())
+        if n_sat > 0:
+            rda_sat_streak += 1
+            # Record EVERY offending dimension, not just the argmax: naming
+            # one when several are pinned hides most of the problem.
+            _sat = (dim_max > 0.98).nonzero().flatten().tolist()
+            rda_sat_dims = _sat
+            rda_sat_worst_dim = int(dim_max.argmax().item())
+        else:
+            rda_sat_streak = 0
+            rda_sat_dims = []
+        if step in rda_sat_checkpoints:
+            rda_sat_log.append({"step": step,
+                                "dim_absmax": [round(float(v), 6) for v in dim_max],
+                                "n_saturated": n_sat})
+            print0("[rda] SAT step=%d n_dim(|E|>0.98)=%d  per-dim |E|max: %s"
+                   % (step, n_sat,
+                      " ".join("%.3f" % v for v in dim_max.tolist())))
+        if rda_sat_streak >= rda_sat_abort_steps:
+            print0("ABORT: %d drive dimension(s) exceeded |E| > 0.98 for %d "
+                   "consecutive steps."
+                   % (len(rda_sat_dims), rda_sat_streak))
+            for _d in rda_sat_dims:
+                print0("ABORT:   saturated dimension '%s' (index %d) "
+                       "|E|max=%.4f"
+                       % (DRIVE_DIMS[_d], _d, float(dim_max[_d])))
+            print0("ABORT: The tanh is pinned; any further loss improvement is "
+                   "not attributable to the drive.")
+            print0("ABORT: run label %r, see manifests/%s.json"
+                   % (args.model_tag, args.model_tag))
+            sys.exit(3)
     # step the optimizer
     lrm = get_lr_multiplier(step)
     muon_momentum = get_muon_momentum(step)

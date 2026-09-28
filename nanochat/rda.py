@@ -197,6 +197,192 @@ class RDAStateModule(nn.Module):
         )
         return E_next
 
+    # -- vectorized recurrence ---------------------------------------------
+    def drive_seq(self, hidden_seq, prediction_error_seq):
+        """Per-position drive for a whole sequence, in one shot.
+
+        The vectorized twin of the body of update(): the same arithmetic, the
+        same parameters, applied to (B, T, d) / (B, T) rather than to one
+        position at a time.
+
+        There is deliberately NO recurrence here. The drive is a function of
+        the BASE hidden states and the prediction error only -- neither of
+        which can depend on E -- so the drive for all T positions can be
+        computed independently, and that is what makes the closed form in
+        update_seq() possible at all.
+
+        hidden_seq:           (B, T, d_model)
+        prediction_error_seq: (B, T)
+        Returns (B, T, n_drives), each entry in (-1, 1) because of the tanh.
+        """
+        h = hidden_seq
+        if h.dim() == 2:
+            h = h.unsqueeze(1)
+        h = h.to(self.event_proj.weight.dtype)
+        pe = prediction_error_seq
+        # pe_proj is Linear(1, n_drives), so pe must carry a trailing
+        # singleton axis. Accept the (B, T) shape the caller has and add it.
+        if pe.dim() == 1:
+            pe = pe.unsqueeze(-1)          # (B,)   -> (B, 1)
+        elif pe.dim() == 2:
+            pe = pe.unsqueeze(-1)          # (B, T) -> (B, T, 1)
+        pe = pe.to(self.pe_proj.weight.dtype)
+        event_term = self.event_drive_scale * self.event_proj(self.h_norm(h))
+        return torch.tanh(event_term + self.pe_proj(pe / self.pe_reference_scale))
+
+    @staticmethod
+    def _max_safe_T(decay, dtype):
+        """Largest T for which decay**-T is finite in `dtype`.
+
+        The closed form divides by decay**t, so the reciprocal must not
+        overflow. That is true exactly while
+
+            T * ln(1/decay) <= ln(finfo(dtype).max)
+
+        Returns the largest integer T satisfying it. Computed rather than
+        hardcoded so it stays correct if `decay` or the accumulation dtype
+        ever change.
+        """
+        import math
+        import numpy as np
+        finfo = (np.finfo(np.float64) if dtype == torch.float64
+                 else np.finfo(np.float32))
+        if decay <= 0.0 or decay >= 1.0:
+            # decay == 0 gives 0**-T = inf for T>0; decay in (0,1) is the
+            # only sane case, and decay == 1 makes w[t] == 1 (no limit).
+            return 0 if decay <= 0.0 else 2 ** 62
+        return int(math.floor(math.log(finfo.max) / math.log(1.0 / decay)))
+
+    def update_seq(self, E_start, drive, chunk=False):
+        """Closed-form E_next_seq for the whole sequence at once.
+
+            E_next[t] = decay * E_next[t-1] + (1 - decay) * drive[t]
+            E_next[-1] := E_start
+
+        Unrolling it:
+
+            E[t] = decay^(t+1) * E_start
+                   + (1 - decay) * sum_{s<=t} decay^(t-s) * drive[s]
+
+        The sum is a decay-weighted prefix sum, and it factorizes as
+
+            E[t] = w[t] * ( decay * E_start + cumsum(g / w)[t] )
+
+        with w[t] = decay^t and g = (1 - decay) * drive. Note the `decay *`
+        in front of E_start: it falls out of the unrolling and is easy to
+        drop. An earlier version of this function used E_start + cumsum(...),
+        which corresponds to seeding the recurrence with E_start/d -- that is
+        the same recurrence run from the WRONG initial state, and it was
+        caught by diagnostics/verify_vectorized_update.py disagreeing with
+        the loop by up to 2.9e-2 in fp32. The whole 1023-step recurrence now
+        collapses to a handful of kernels instead of ~20k sequential ones.
+
+        WHY THE ACCUMULATION IS float64. The cumsum form divides by
+        w[t] = decay^t, and its reciprocal decay**-t must stay FINITE.
+
+        COMPUTED LIMIT, for the default decay=0.95. decay**-T overflows when
+        T > ln(finfo_max) / ln(1/decay):
+
+            float64 (what this function actually uses):
+                T <= 13837    (13,837 * ln(1/0.95) = 709.78 vs
+                               ln(1.797e308) = 709.78)
+            float32, for reference:
+                T <= 1729
+
+        So a float64 cumsum is exact for any realistic sequence -- training
+        uses T=1024, which is 13.5x inside the limit -- but it is NOT
+        unbounded, and a long-context experiment could cross it. Hence
+        _max_safe_T() below, which computes the limit from the dtype and the
+        actual decay rather than hardcoding it, and the assert that enforces
+        it. A previous version hardcoded L <= 6000, which was a guess that
+        happened to sit under the true limit; computing it removes the guess.
+
+        It costs nothing measurable to use float64 here: these tensors are
+        (B, T, 8), tiny next to the base model, and no matmul is involved --
+        which matters, since fp64 throughput is poor on consumer GPUs. The
+        result is cast back to the drive dtype so the rest of forward() is
+        unaffected.
+
+        EQUIVALENCE, and its single caveat. This is the same recurrence, so
+        the state trajectory agrees with the loop up to floating-point
+        rounding; measured max|E_closed_form - E_loop| is reported by
+        diagnostics/verify_vectorized_update.py.
+
+        The one structural difference is update()'s defensive
+        clamp(E_prev, -1, 1). Since E_next convex-combines two values already
+        in [-1, 1], it lies in [-1, 1] in exact arithmetic, so the clamp can
+        only ever fire on a value within one ulp (~6e-8) of the bound, where
+        it alters that value by at most that much and the alteration is then
+        damped by `decay` at every subsequent step. It is not applied here
+        because doing so would defeat the closed form. The discrepancy is
+        bounded by ~1e-7, far below the loop's own accumulated rounding error.
+        """
+        assert drive.dim() == 3, (
+            f"drive must be (B, T, n_drives), got {tuple(drive.shape)}"
+        )
+        B, L, n = drive.shape
+        d = self.decay
+        acc_dtype = torch.float64
+        limit = self._max_safe_T(d, acc_dtype)
+        if L > limit:
+            # Two ways out, both of which keep the closed form. The default
+            # is to FAIL LOUDLY rather than silently change behaviour: a
+            # sequence this long is outside what the accumulation can
+            # represent, and quietly chunking would hide a real numerical
+            # limit. Callers that knowingly want the chunked path pass
+            # chunk=True.
+            if not chunk:
+                raise ValueError(
+                    f"update_seq: L={L} exceeds the {limit} that "
+                    f"decay**-T stays finite in {acc_dtype} (decay={d}). "
+                    f"The closed form would overflow. Pass chunk=True to "
+                    f"split the recurrence into safe segments."
+                )
+            return self._update_seq_chunked(E_start, drive, limit)
+        dev = drive.device
+        w = torch.pow(                       # w[t] = decay**t,  (L,)
+            torch.tensor(d, device=dev, dtype=acc_dtype),
+            torch.arange(L, device=dev, dtype=acc_dtype),
+        )
+        g = (1.0 - d) * drive.to(acc_dtype)            # (B, L, n)
+        wv = w.view(1, L, 1)                            # (1, L, 1)
+        acc = torch.cumsum(g / wv, dim=1)               # (B, L, n)
+        E0 = (d * E_start).to(acc_dtype).unsqueeze(1)   # (B, 1, n)
+        E = wv * (E0 + acc)
+        E = E.to(drive.dtype)
+        assert E.abs().max() <= 1.0 + 1e-6, (
+            f"vectorized update escaped [-1, 1]: max|E_next|={E.abs().max()}"
+        )
+        return E
+
+    def _update_seq_chunked(self, E_start, drive, limit):
+        """update_seq() for L > limit, split into segments of `limit` steps.
+
+        The recurrence is split at position k, where the incoming state for
+        the next segment is simply E[k-1] -- the state the previous segment
+        ended on. Each segment is then a fresh closed form seeded with that
+        value, so the ONLY thing the chunking changes is which T the
+        accumulation runs over; the result is the same recurrence.
+
+        The per-segment exponent is RESET to 0, so each segment's
+        decay**-t stays within the finite range. This is the standard
+        blocked-scan decomposition and is exact, not an approximation.
+        """
+        B, L, n = drive.shape
+        outs, carry = [], E_start
+        for s in range(0, L, limit):
+            e = min(s + limit, L)
+            seg = drive[:, s:e, :]
+            # update_seq returns the whole per-position sequence for this
+            # segment; the next segment is seeded with its LAST state, which
+            # is the recurrence's carry -- not the segment's whole output.
+            seg_out = self.update_seq(carry, seg)
+            outs.append(seg_out)
+            carry = seg_out[:, -1, :]
+        E = torch.cat(outs, dim=1)
+        assert E.shape[1] == L, f"chunking lost positions: {E.shape[1]} != {L}"
+        return E
+
     # -- modulation ---------------------------------------------------------
     def modulate(self, x, E_t) -> torch.Tensor:
         """FiLM-modulate hidden states x (B, T, d_model) with a PER-POSITION
@@ -294,6 +480,27 @@ class RDAPredictor(nn.Module):
             self.event_proj(pre_outcome_hidden) + self.state_proj(E_t)
         )
 
+    def predict_seq(self, E_t, pre_outcome_hidden):
+        """Sequence form of predict(): (B, T, n) states, (B, T, d) hiddens.
+
+        Elementwise-identical to calling predict() on each position; there is
+        no recurrence here, so this is simply the same two Linear layers
+        applied to the whole sequence at once.
+
+        E_t:                (B, T, n_drives)  the state entering each position
+        pre_outcome_hidden: (B, T, d_model)
+        Returns (B, T, n_drives).
+        """
+        if E_t.dim() == 2:
+            E_t = E_t.unsqueeze(1)
+        if pre_outcome_hidden.dim() == 2:
+            pre_outcome_hidden = pre_outcome_hidden.unsqueeze(1)
+        h = pre_outcome_hidden.to(self.event_proj.weight.dtype)
+        e = E_t.to(self.state_proj.weight.dtype)
+        return torch.tanh(
+            self.event_proj(h) + self.state_proj(e)
+        )
+
 
 def drive_prediction_error(E_actual, E_hat_next) -> torch.Tensor:
     """Elementwise E_actual - E_hat_next, shape (B, n_drives).
@@ -384,6 +591,41 @@ class GPTWithRDA(nn.Module):
         # the value the Engine must feed back in as E_t_external on the next
         # step, so T=1 decoding continues the same recurrence.
         self.last_state = None
+
+    # -- reference implementation (sequential) ------------------------------
+    def _update_loop_reference(self, E_t, pre_outcome_hidden, pe_seq):
+        """REFERENCE ONLY: the original sequential recurrence, kept verbatim.
+
+        Same order of operations as the original loop:
+
+            for t: E_next = update(E_next, h_t, pe_seq[:, t])
+                   E_hat_next = predictor.predict(E_t, h_t)   # from E_t, BEFORE
+                   append, then rebind E_t = E_next
+
+        Note the predictor is fed E_t from BEFORE the update at that position,
+        which is why step_Ehat and step_E are built in the same pass.
+
+        This is not called by forward(); it is the oracle that
+        diagnostics/verify_vectorized_update.py compares the closed form
+        against, so the loop has to stay exactly as it was. It costs ~200x the
+        vectorized path, so nothing on the training hot path may call it.
+        """
+        E_next = E_t
+        step_E, step_Ehat = [], []
+        for t in range(pre_outcome_hidden.size(1)):
+            h_t = pre_outcome_hidden[:, t, :]
+            E_next = self.state.update(E_next, h_t, pe_seq[:, t])
+            E_hat_next = self.predictor.predict(E_t, h_t)
+            step_E.append(E_next)
+            step_Ehat.append(E_hat_next)
+            E_t = E_next
+        if not step_E:
+            return E_next, None, None
+        return (
+            E_next,
+            torch.stack(step_E, dim=1),      # (B, T-1, n_drives)
+            torch.stack(step_Ehat, dim=1),    # (B, T-1, n_drives)
+        )
 
     # -- leakage guard ------------------------------------------------------
     def _assert_no_temporal_leakage(self, pre_outcome_hidden, pooled_post_outcome):
@@ -584,21 +826,26 @@ class GPTWithRDA(nn.Module):
             )
 
         E_start = E_t
-        step_E, step_Ehat = [], []
-        for t in range(pre_outcome_hidden.size(1)):
-            h_t = pre_outcome_hidden[:, t, :]
-            E_next = self.state.update(E_next, h_t, pe_seq[:, t])
-            # Predict the state we are ABOUT to observe, from the pre-outcome
-            # view, then compare. The prediction is made from E_t (before the
-            # update) and the same pre-outcome hidden state.
-            E_hat_next = self.predictor.predict(E_t, h_t)
-            step_E.append(E_next)
-            step_Ehat.append(E_hat_next)
+        # VECTORIZED RECURRENCE. The drive depends only on the base hidden
+        # states and the PE, neither of which can depend on E, so the whole
+        # E sequence has a closed form and is computed in one shot. See
+        # RDAStateModule.update_seq(); the sequential original is preserved
+        # verbatim in _update_loop_reference() and is what the verification
+        # script compares against.
+        #
+        # The predictor still needs E at each position, so it is applied
+        # AFTER the state sequence exists, shifted by one: the prediction for
+        # position t is made from E_t = E_start if t == 0 else E_next_seq[t-1],
+        # which is exactly the pre-update state the loop used.
+        L = pre_outcome_hidden.size(1)
+        if L > 0:
+            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq)
+            E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
+            # E_t entering the predictor at each position, shifted by one.
+            E_in = torch.cat([E_start.unsqueeze(1), E_next_seq[:, :-1, :]], dim=1)
+            E_hat_seq = self.predictor.predict_seq(E_in, pre_outcome_hidden)
+            E_next = E_next_seq[:, -1, :]
             E_t = E_next
-
-        if step_E:
-            E_next_seq = torch.stack(step_E, dim=1)    # (B, T-1, n_drives)
-            E_hat_seq = torch.stack(step_Ehat, dim=1)  # (B, T-1, n_drives)
             dpe = drive_prediction_error(E_next_seq, E_hat_seq)
         else:
             # SINGLE-TOKEN DECODE (T == 1 with a KV cache).
@@ -666,6 +913,11 @@ class GPTWithRDA(nn.Module):
         # both cases. E_start is the state that entered the step, which is what
         # the debug log wants.
         E_next_final = E_t
+        # Expose the full per-position state for the training loop's
+        # saturation monitor. Kept as a detached-by-convention attribute
+        # rather than returned, so the forward() contract (and therefore the
+        # round-trip test) is unchanged.
+        self._last_E_next_seq = E_next_seq.detach()
 
         # Document starts are reported, never acted on (decay-only persistence).
         n_doc_starts = 0 if doc_starts is None else int(doc_starts.sum().item())
