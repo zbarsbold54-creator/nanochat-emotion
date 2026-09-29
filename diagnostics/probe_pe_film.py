@@ -33,7 +33,7 @@ import torch
 
 from nanochat.common import compute_init
 from nanochat.gpt import GPT, GPTConfig
-from nanochat.rda import GPTWithRDA, DRIVE_DIMS
+from nanochat.rda import GPTWithRDA, DRIVE_DIMS, _unit_rms
 from nanochat.tokenizer import get_tokenizer
 from nanochat.dataloader import tokenizing_distributed_data_loader_with_state_bos_bestfit
 
@@ -142,22 +142,44 @@ def main():
     ap.add_argument("--film-norm", type=float, default=0.0,
                     help="C6: bound FiLM gain to this RMS (0 = off)")
     ap.add_argument("--label", default="run")
+    ap.add_argument("--log", default=None,
+                    help="also write every console line here as UTF-8")
+    ap.add_argument("--abort-steps", type=int, default=0,
+                    help="abort if |E|>0.98 for this many consecutive steps "
+                         "(same rule as base_train.py; 0 = never)")
     a = ap.parse_args()
     device = torch.device(a.device)
 
-    print("=" * 78)
-    print("PE / FiLM RUNAWAY PROBE  --  label=%s" % a.label)
-    print("=" * 78)
+    # LOG HYGIENE. PowerShell's `>` writes UTF-16LE, and a naive UTF-8 read
+    # of the result returns NOTHING -- silently, with no error. That cost a
+    # full extraction attempt on logs/pe_1000.txt before it was noticed, and
+    # it is the reason the per-step series for the earlier E13 runs had to
+    # be recovered by decoding UTF-16 by hand. This tee writes UTF-8
+    # directly so nothing downstream has to guess the encoding.
+    _log = open(a.log, "w", encoding="utf-8", newline="\n") if a.log else None
+    _real_print = print
+
+    def say(line=""):
+        _real_print(line, flush=True)
+        if _log is not None:
+            _log.write(line + "\n")
+            _log.flush()
+
+    say("=" * 78)
+    say("PE / FiLM RUNAWAY PROBE  --  label=%s" % a.label)
+    say("=" * 78)
+    say("  json : %s" % a.out)
+    say("  log  : %s (utf-8)" % a.log)
     abl = [n for n, f in (("C2 no-film", a.no_film), ("C3 freeze-base", a.freeze_base),
                          ("C4 freeze-pe", a.freeze_pe), ("C5 detach-pe", a.detach_pe),
                          ("C6 film-norm %g" % a.film_norm, a.film_norm > 0)) if f]
-    print("device=%s steps=%d seed=%d" % (a.device, a.steps, a.seed))
-    print("ACTIVE IMPLEMENTATION: production nanochat/rda.py")
-    print("  drive_seq overridden?      NO (never overridden in this script)")
-    print("  prediction_error override? NO")
-    print("  ablations active:          %s" % (", ".join(abl) if abl else "NONE (reference)"))
-    print("  observation hooks are pure: they return their input unchanged.")
-    print()
+    say("device=%s steps=%d seed=%d" % (a.device, a.steps, a.seed))
+    say("ACTIVE IMPLEMENTATION: production nanochat/rda.py")
+    say("  drive_seq overridden?      NO (never overridden in this script)")
+    say("  prediction_error override? NO")
+    say("  ablations active:          %s" % (", ".join(abl) if abl else "NONE (reference)"))
+    say("  observation hooks are pure: they return their input unchanged.")
+    say()
 
     m, tok, loader = build(a.seed, device)
     st = m.state
@@ -172,7 +194,7 @@ def main():
     handles, cap = install_hooks(m, a)
     live = (len(st.pe_proj._forward_hooks) + len(st.pe_proj._backward_hooks) +
             len(st.film_scale._forward_hooks) + len(st.film_shift._forward_hooks))
-    print("hooks installed (observation + ablation): %d" % live)
+    say("hooks installed (observation + ablation): %d" % live)
 
     B_REF = 524288
     scale = (32768.0 / B_REF) ** 0.5
@@ -208,13 +230,15 @@ def main():
         optimizer.add_param_group(g)
     opt = optimizer
     n_state_p = sum(len(g["params"]) for g in rda_groups)
-    print("base optimizer: %s with %d groups; appended %d state tensors"
-          % (type(opt).__name__, len(opt.param_groups), n_state_p))
-    print("drive-group LR=%.5f  (base_train.py batch_lr_scale)" % LR_M)
-    print()
+    say("base optimizer: %s with %d groups; appended %d state tensors"
+        % (type(opt).__name__, len(opt.param_groups), n_state_p))
+    say("drive-group LR=%.5f  (base_train.py batch_lr_scale)" % LR_M)
+    say()
 
     rec = []
     carry = None
+    _over = 0
+    abort_fired = False
     for step in range(a.steps):
         # NOT set_to_none=True: MuonAdamW's fused kernels dereference every
         # grad unconditionally, so a None grad is a hard crash. Zeroing (rather
@@ -280,7 +304,46 @@ def main():
             # FiLM's effect on scale: 1 + film_s
             row["mod_scale_absmax"] = float((1.0 + fs).abs().max())
             row["mod_scale_min"] = float((1.0 + fs).min())
+
+            # APPLIED gain -- the quantity that actually multiplies the
+            # residual stream. The two lines above are built from the RAW
+            # film_scale output, because the forward hook sees the module
+            # output and _unit_rms is applied afterwards, inside modulate().
+            # Measured directly (diagnostics/verify_film_s_definition.py):
+            # max|1+fs| and max|1+_unit_rms(fs)| differ by roughly 2x, so
+            # reporting only the raw one misreports the gain by that factor.
+            # _unit_rms cannot be reconstructed from the aggregates stored
+            # above -- it needs the per-position channel vector -- which is
+            # why it is computed here rather than derived downstream.
+            g_scale = _unit_rms(fs, st.film_rms)
+            g_shift = _unit_rms(fh, st.film_rms)
+            row["applied_scale_absmax"] = float((1.0 + g_scale).abs().max())
+            row["applied_scale_min"] = float((1.0 + g_scale).min())
+            row["applied_scale_rms"] = float((1.0 + g_scale).pow(2).mean().sqrt())
+            row["applied_shift_absmax"] = float(g_shift.abs().max())
+            row["applied_shift_rms"] = float(g_shift.pow(2).mean().sqrt())
+            # The per-position RMS of the applied term is pinned at film_rms
+            # by construction. Recorded so a reader can confirm the identity
+            # instead of taking it on faith.
+            row["applied_gain_rms_check"] = float(g_scale.pow(2).mean().sqrt())
         rec.append(row)
+
+        # ABORT RULE, identical to base_train.py: a drive pinned above the
+        # bound for N consecutive steps means the tanh has stopped responding
+        # and no later number is attributable to the drive. Stop and record.
+        if a.abort_steps > 0:
+            if row["E_absmax"] > 0.98:
+                _over += 1
+            else:
+                _over = 0
+            if _over >= a.abort_steps:
+                abort_fired = True
+                say("")
+                say("*** ABORT: |E|>0.98 for %d consecutive steps (ending step %d)"
+                    % (a.abort_steps, step))
+                say("*** max|E| = %.4f. Stopping; recorded as FAIL."
+                    % row["E_absmax"])
+                break
 
         # A frozen parameter has requires_grad=False, so autograd never
         # populates its .grad. The fused Muon/AdamW kernels dereference every
@@ -302,37 +365,48 @@ def main():
         carry = out["E_next"]
 
         if step % 25 == 0 or step == a.steps - 1:
-            print("step %3d | loss=%.4f pe_max=%.3f peWb=%.3f peOut=%.3f | "
-                  "film s=%.3f shift=%.3f filmW=%.3f | maxE=%.4f | gbase=%.1f"
-                  % (step, row["loss"], row["pe_max"],
-                     row["pe_proj_b_norm"], row["pe_out_absmax"],
-                     row["mod_scale_absmax"], row["film_h_max"],
-                     row["film_w_norm"], row["E_absmax"], row["g_base"]))
+            say("step %3d | loss=%.4f pe_max=%.3f peWb=%.3f peOut=%.3f | "
+                "film s=%.3f APPLIED=%.3f shift=%.3f filmW=%.3f | maxE=%.4f | gbase=%.1f"
+                % (step, row["loss"], row["pe_max"],
+                   row["pe_proj_b_norm"], row["pe_out_absmax"],
+                   row["mod_scale_absmax"], row["applied_scale_absmax"],
+                   row["film_h_max"],
+                   row["film_w_norm"], row["E_absmax"], row["g_base"]))
 
     for h in handles:
         h.remove()
     left = (len(st.pe_proj._forward_hooks) + len(st.pe_proj._backward_hooks) +
             len(st.film_scale._forward_hooks) + len(st.film_shift._forward_hooks))
-    print("\nhooks after run: %d (expect 0)" % left)
-
+    say("\nhooks after run: %d (expect 0)" % left)
     first = next((r["step"] for r in rec if r["E_absmax"] > 0.98), None)
-    print("\n=== %s ===" % a.label)
-    print("first step |E|>0.98 : %s" % ("never" if first is None else first))
-    print("max |E|             : %.4f" % max(r["E_absmax"] for r in rec))
-    print("final |E|           : %.4f" % rec[-1]["E_absmax"])
-    print("PE   first/max/final: %.3f / %.3f / %.3f"
-          % (rec[0]["pe_max"], max(r["pe_max"] for r in rec), rec[-1]["pe_max"]))
-    print("peW  first/final    : %.4f / %.4f" % (rec[0]["pe_proj_w_norm"], rec[-1]["pe_proj_w_norm"]))
-    print("peB  first/final    : %.4f / %.4f" % (rec[0]["pe_proj_b_norm"], rec[-1]["pe_proj_b_norm"]))
-    print("film scale max      : %.4f" % max(r["mod_scale_absmax"] for r in rec))
-    print("film shift max      : %.4f" % max(r["film_h_max"] for r in rec))
-    print("hidden rms first/last: %.4f / %.4f" % (rec[0]["hidden_rms"], rec[-1]["hidden_rms"]))
-    print("g_base max          : %.2f" % max(r["g_base"] for r in rec))
-    print("loss first/last     : %.4f / %.4f" % (rec[0]["loss"], rec[-1]["loss"]))
+    say("\n=== %s ===" % a.label)
+    say("first step |E|>0.98 : %s" % ("never" if first is None else first))
+    say("max |E|             : %.4f" % max(r["E_absmax"] for r in rec))
+    say("final |E|           : %.4f" % rec[-1]["E_absmax"])
+    say("PE   first/max/final: %.3f / %.3f / %.3f"
+        % (rec[0]["pe_max"], max(r["pe_max"] for r in rec), rec[-1]["pe_max"]))
+    say("peW  first/final    : %.4f / %.4f" % (rec[0]["pe_proj_w_norm"], rec[-1]["pe_proj_w_norm"]))
+    say("peB  first/final    : %.4f / %.4f" % (rec[0]["pe_proj_b_norm"], rec[-1]["pe_proj_b_norm"]))
+    say("RAW   film scale max: %.4f   (max|1+fs|, pre-_unit_rms)"
+        % max(r["mod_scale_absmax"] for r in rec))
+    say("APPLIED gain max    : %.4f   (max|1+_unit_rms(fs,%.2f)|)"
+        % (max(r["applied_scale_absmax"] for r in rec), st.film_rms))
+    say("applied gain rms chk: %.4f   (must equal film_rms=%.2f)"
+        % (rec[-1]["applied_gain_rms_check"], st.film_rms))
+    say("RAW   film shift max: %.4f" % max(r["film_h_max"] for r in rec))
+    say("APPLIED shift max   : %.4f" % max(r["applied_shift_absmax"] for r in rec))
+    say("hidden rms first/last: %.4f / %.4f" % (rec[0]["hidden_rms"], rec[-1]["hidden_rms"]))
+    say("g_base max          : %.2f" % max(r["g_base"] for r in rec))
+    say("loss first/last     : %.4f / %.4f" % (rec[0]["loss"], rec[-1]["loss"]))
+    if a.abort_steps > 0:
+        say("ABORT RULE          : |E|>0.98 for %d consecutive steps -> %s"
+            % (a.abort_steps, "FIRED" if abort_fired else "not fired"))
 
     if a.out:
         json.dump(rec, open(a.out, "w"), indent=1)
-        print("wrote %s" % a.out)
+        say("wrote %s" % a.out)
+    if _log is not None:
+        _log.close()
 
 
 if __name__ == "__main__":
