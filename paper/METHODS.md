@@ -24,11 +24,29 @@ RDA enabled, on the stabilized architecture:
 - event projection output RMS-normalized
 - FiLM modulation vector RMS-normalized to `film_rms = 0.5`
 - per-position causal FiLM
+- **per-position prediction error indexed as `targets[:, :-1]`, so the drive
+  state at position `p` has not seen `y[p]`** (added in `969e067`; see
+  LIMITATIONS §4a. Before this, `targets[:, 1:]` gave the state a one-token
+  view of the label it was scored on, and every B′ number measured with it is
+  withdrawn)
 - decay-only persistence, `decay = 0.95`
 
 Everything else is identical to A. In particular B' does **not** change
 the learning rate, the weight decay, the batch size, the data, or the
 tokenizer.
+
+### 1.2a The label-blindness invariant
+
+The PE pathway is the only route by which the targets reach the model, so
+one condition governs the whole treatment:
+
+    film_state[p] may depend on y[j] only for j < p.
+
+Since `y[j] == x[j+1]`, this is equivalent to `film_state[p]` depending only
+on `x[0..p]` — exactly what a causal transformer position is entitled to see.
+`diagnostics/test_no_label_leak.py` enforces it and runs as a hard
+pre-flight gate in `scripts/base_train.py`. It fails on `6ae93ce` (12
+violations) and passes on `969e067`.
 
 ### 1.3 The identity-at-init property
 

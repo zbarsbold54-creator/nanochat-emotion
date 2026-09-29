@@ -99,10 +99,34 @@ README claimed it was "a better language model on this measure". That claim is
 withdrawn: it rested on a single-seed comparison whose margin is smaller than
 the seed-to-seed spread of the control.
 
-**Causal-FiLM B′ has no result yet.** The first B′ attempt aborted at step ~10
+**Causal-FiLM B′ has no valid result.** The first B′ attempt aborted at step ~10
 under the saturation rule: the `threat` drive crossed |E| > 0.98 and stayed
 there, meaning the tanh had stopped responding and no later loss number would
-have been attributable to the drive. Fixing that is the current work.
+have been attributable to the drive.
+
+> **CORRECTION (2026-09-29). Everything above about B′ is superseded.** A
+> further **label leak** was found and fixed in `969e067`: `rda.py` built the
+> per-position prediction error from `targets[:, 1:]`, which made the drive
+> state at position `p` depend on `y[p]` — the exact token `logits[p]` is
+> scored against, since the dataloader makes `y[p] == x[p+1]` and the loss is
+> `cross_entropy(logits[p], targets[p])` with no shift. One token of the answer
+> reached the model.
+>
+> **The B′-s42 result of 1.226305 vs baseline 1.301217 (a 0.0749 gain) is
+> WITHDRAWN.** It measured the leak, not the state. Evidence is committed
+> under `diagnostics/audit_label_leak/`; the permanent regression test
+> `diagnostics/test_no_label_leak.py` fails with 12 violations on `6ae93ce`
+> and passes after the fix, and `scripts/base_train.py` now runs it as a hard
+> pre-flight gate that refuses to start a leaking run.
+>
+> Note the failure was **silent**: the model trained normally, the loss fell
+> normally, and val BPB came out *below* baseline. A metric that improves when
+> the model is cheating is the signature to look for.
+>
+> The A baseline numbers above are **unaffected** — those runs never passed
+> `--rda`. Only B′ results are invalid. B′ must be re-measured from scratch.
+> The 1000-step stability confirmation on fixed code is also FAIL on trend
+> (see `research/EXPERIMENT_LOG.md`, E13-fixed).
 
 **The recall harness results are single-seed and not conclusive.** The
 per-group differences between A and the old B are small relative to their

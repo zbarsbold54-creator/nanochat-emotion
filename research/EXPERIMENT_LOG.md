@@ -466,6 +466,255 @@ Limitations:
 
 ---
 
+## E13-SUPERSEDED — 1000-step production confirmation — **measured WITH A LABEL LEAK**
+
+> **SUPERSEDED BY E13-fixed. Do not cite the numbers below as evidence of
+> stability.** This entry is retained verbatim as history, not deleted.
+>
+> **What the leak was.** `rda.py` built the per-position prediction error
+> from `targets[:, 1:]`. Since `pe_seq` is indexed by input position and
+> `E_next_seq[j]` is the state after consuming position `j`, that made
+> `pe_seq[j]` a function of `y[j+1] = x[j+2]`. Because
+> `film_state[p] = E_next_seq[p-1]` and
+> `logits[p] = lm_head(modulate(hidden[p], film_state[p]))`, the drive
+> state at position `p` had already seen `x[p+1]` — the very token
+> `logits[p]` is scored against, since the dataloader makes
+> `y[p] == x[p+1]` and the loss is `cross_entropy(logits[p], targets[p])`
+> with no shift. One token of the answer reached the model.
+>
+> **Fixed in `969e067`** by indexing `pe_seq` as `targets[:, :-1]`.
+> `diagnostics/test_no_label_leak.py` fails with 12 violations on
+> `6ae93ce` and passes with 0 after the fix; `scripts/base_train.py` now
+> runs it as a hard pre-flight gate.
+>
+> **Commits whose B′ results are affected:** every B′ run from `ab9b560`
+> through `6ae93ce`, including the B′-s42 canary and this E13 entry.
+> Probe evidence is committed under `diagnostics/audit_label_leak/`.
+>
+> **What survives and what does not.** The saturation *mechanism* findings
+> (event-output normalization, FiLM self-excitation) were diagnosed on
+> probe runs that also carried the leak, so they are not independent
+> measurements of the fixed architecture. The specific figures below are
+> superseded by E13-fixed. The baseline A numbers (1.301217 etc.) are
+> unaffected: those runs never passed `--rda`.
+
+```
+Date:        2026-09-29
+Git commit:  6977c60 (code under test; no code change in this entry)
+Seed:        42
+Config:      depth 8, d_model 768, T=1024, TOY SCALE, 1000 steps
+Question:    Is the PE/FiLM saturation mechanism CONTROLLED rather than
+             merely DELAYED?
+Method:      diagnostics/probe_pe_film.py, 1000 steps, production rda.py
+             with no ablation flags. Console output to logs\pe_1000.txt,
+             per-step records to logs\pe_1000.json.
+Result:
+    max |E| over all 1000 steps      0.9401  at step 254
+    steps with |E| > 0.98            NONE
+    FiLM gain, steps 250-999         mean 1.3617, stdev 0.0386
+                                     min 1.2820, max 1.5781
+    FiLM gain slope (250-999)        -0.000033 / step  (-0.0033 per 100)
+    FiLM gain  0 -> 1.0000
+               250 -> 1.4290
+               500 -> 1.3561
+               750 -> 1.3562
+               999 -> 1.4001
+    PE max    0 -> 10.491
+              250 -> 36.858
+              500 -> 38.733
+              750 -> 38.861
+              999 -> 38.862        (PLATEAUS near 38.9 after ~step 250)
+    loss     10.3983 -> 4.7816
+    post-peak decay, max |E| per 100-step window:
+        250-349  0.9401     350-449  0.9397     450-549  0.9297
+        550-649  0.8977     650-749  0.8511     750-849  0.8143
+        850-949  0.7575     950-999  0.6724
+    windows exceeding the previous window's max   NONE
+Interpretation:
+    PASS on both pre-registered criteria.
+    1. |E| <= 0.98 for all 1000 steps, with 0.040 of margin.
+    2. FiLM gain is stationary around 1.36 and the slope is NEGATIVE, so
+       the specific failure mode the criterion was written to catch --
+       gain drifting upward while |E| stays under threshold -- is absent.
+
+    On "controlled vs delayed": in the unstabilized configuration |E|
+    crossed 0.98 at step 217 and was rising. Here |E| PEAKS at step 254 and
+    then decays monotonically in every 100-step window, to 0.6724 by step
+    999 -- a factor of 1.4 below its own peak while training continues. A
+    delayed ratchet can only arrive later; it cannot fall. Combined with
+    the flat-to-negative gain slope, the mechanism is controlled.
+
+    Incidental: PE plateaus near 38.9 after ~step 250 rather than growing
+    without bound. This partially answers the E16 anomaly -- the growth
+    self-limits -- but does not explain it.
+Limitations:
+    SINGLE SEED (42). TOY SCALE (depth 8, d_model 768), not the real B'
+    configuration. 1000 steps is still far shorter than a production
+    training run, so this is evidence, not proof. The stronger control is
+    the saturation abort enabled on the real training job.
+    The 375 raw step-to-step increases after the peak are ordinary
+    sampling noise in max|E|; the windowed test is the meaningful one.
+    >>> SUPERSEDED: measured with the label leak described above. The
+        "gain slope NEGATIVE" and "|E| decays monotonically" conclusions
+        do NOT reproduce on the fixed code -- see E13-fixed, where the
+        applied gain slope is +5.72e-04/step and max|E| RISES from
+        window 500 onward. Do not carry this entry's conclusion forward.
+```
+
+---
+
+## E14 — label-leak fix and audit — **the 0.0749 BPB gain is WITHDRAWN**
+
+```
+Date:        2026-09-29
+Fix commit:  969e067  "Fix a one-token label leak in the RDA drive state"
+Question:    Is the B'-s42 result (1.226305 vs baseline 1.301217) real?
+Method:      Read-only audit of the saved checkpoints plus a permanent
+             regression test. No training. Scripts and raw output under
+             diagnostics/audit_label_leak/.
+Result:
+    LEAK CONFIRMED. The drive state could see the label it was scored on.
+    WITHDRAWN: the 0.0749 BPB gain. It measured the leak, not the state.
+
+    Verified indexing facts:
+        y[p] == x[p+1]                                    fraction 1.000000
+        gpt.py:532  cross_entropy(logits[p], targets[p])  no shift
+        rda.py:901  pe_seq[j] from targets[:, 1:]  ->  y[j+1] = x[j+2]
+        rda.py:920  E_next_seq[j] depends on x[j+2]
+        rda.py:972  film_state[p] = E_next_seq[p-1] -> x[p+1]
+        rda.py:1036 logits[p] = lm_head(modulate(hidden[p], film_state[p]))
+        => logits[p] depends on the token it is graded against.
+
+    Dynamic proof: perturb y[:,k] alone with x fixed. hidden and logits at
+    positions < k are EXACTLY 0 difference; positions >= k all move (the
+    recurrence is cumulative). The violation is the diagonal.
+
+    Why the earlier causality tests missed it: they perturbed x, never y.
+    Perturbing x can only ever find a forward-token leak, and this leak
+    runs through the LABELS. Two existing tests
+    (verify_t1024.py, verify_vectorized_update.py) had controls asserting
+    that position p DOES change when y[:,p] changes -- i.e. they were
+    written to pass with the leak present. Both corrected in 969e067.
+
+    Ablations on the leaky checkpoint (24 identical val batches):
+        baseline a-s42  TRUE y  1.242340
+        B'-s42          TRUE y  1.137101
+        B'-s42  event term zeroed   1.596395
+        B'-s42  FiLM forced const   2.990616
+        B'-s42  PE term zeroed      4.371596
+      Every ablation lands FAR WORSE than the 1.242340 baseline, which is
+      the signature of a model leaning on the leaked signal rather than
+      one that has genuinely learned something.
+Interpretation:
+    The configuration was never wrong and the baseline was never
+    contaminated: a-s42 and b-stab-s42 differ only by --rda and
+    --model-tag (flag-by-flag diff: 0 differences in the shared set), and
+    the dataset, shard count and shard-00000 edge hash all match. The
+    invalidity is in the METRIC, not the config: the evaluation was not
+    label-blind, so A and B were not measured on the same task.
+
+    Two methods used during this audit were themselves wrong and are
+    retracted here rather than quietly dropped:
+      - "shuffle y and re-score" as a label-blindness test. The BASELINE
+        also moves (+1.748) under it, because scoring against wrong
+        answers is simply a harder task. It confounds cheating with
+        difficulty. Not evidence either way.
+      - "PE OFF via targets=None" (4.29). Invalid counterfactual: it puts
+        the TRAINED FiLM into a state distribution it never saw.
+Limitations:
+    Fixing the index changes what the model is asked to do, so every B'
+    number must be re-measured. The cheapest valid rerun is B' only
+    (600 steps, ~34 min); the A baseline is unaffected.
+    E16 (the PE plateau anomaly) is NOT resolved by this and remains open.
+```
+
+---
+
+## E13-fixed — 1000-step production confirmation on FIXED code — **FAIL**
+
+```
+Date:        2026-09-29
+Fix commit:  969e067
+Seed:        42
+Config:      depth 8, d_model 768, T=1024, TOY SCALE, 1000 steps
+Method:      diagnostics/probe_pe_film.py, 1000 steps, production rda.py
+             with no ablation flags. Harness byte-identical to E13
+             (`git diff 6ae93ce 969e067 -- diagnostics/probe_pe_film.py`
+             is 0 lines), so the two runs are directly comparable.
+Output:      logs\pe_1000_fixed.json, logs\pe_1000_fixed.txt
+
+VERDICT: FAIL. G1, G2 and G4 pass; G3 fails.
+
+  G1  max|E| <= 0.98 ................................. PASS
+      peak 0.9690 at step 921, 0 steps over bound, margin 0.0110
+  G2  applied gain in band [1.0, 2.0] (mid 1.5) ..... PASS
+      mean 1.8821, median 1.8870, min 1.6190, max 2.0760
+  G3  applied gain shows no upward trend ............. FAIL
+      least-squares slope +5.7156e-04 per step (tol 1e-04)
+      3 of 4 windows rising (starts 450, 650, 850)
+  G4  loss finite and decreasing .................... PASS
+      10.3983 -> 5.1722
+
+Applied gain, 'film s' = max|1 + _unit_rms(film_scale(E), 0.5)|:
+      step    0 : 1.0000
+      step  250 : 1.6190
+      step  500 : 1.7620
+      step  750 : 2.0680
+      step  999 : 2.0620
+
+    WHAT "film s" IS, PRECISELY. It is
+        max over (batch, position, channel) of |1 + _unit_rms(fs, 0.5)|
+    where fs is the captured output of the film_scale module. This is a
+    MAXIMUM over a (B, T, d_model) tensor, NOT an RMS and NOT a mean. The
+    per-position RMS of the applied term is pinned at exactly 0.5 by
+    construction (that is what _unit_rms does), so the only thing that
+    varies across steps is the per-channel SPREAD; the printed number is
+    the extreme channel. That is why it reaches 2.07 while rms(g) is 0.5.
+    It is NOT comparable to the JSON column `film_s_rms`, which is
+    max-independent: film_s_rms is the RMS of the RAW projection, taken
+    BEFORE _unit_rms.
+
+    HARNESS NOTE. An earlier pass scored G2/G3 against the JSON
+    `film_s_rms` column and reported a mean of 0.4472 and a near-zero
+    range. That was the wrong column (pre-_unit_rms raw projection, not
+    the applied gain) and the resulting FAIL on G2 was wrong. G2 passes on
+    the correct series. G1 and G3 were unaffected and stand as reported.
+
+    SEPARATE CONCERN, NOT PART OF THE ORIGINAL PASS RULE. max|E| is
+    RISING on the fixed code: 0.9205 / 0.8890 / 0.9133 / 0.9459 / 0.9594
+    / 0.9642 / 0.9690 across 100-step windows 300-399 through 900-999,
+    i.e. five consecutive rising windows from 500 onward, ending 0.0110
+    from the 0.98 abort bound. The original criterion was only
+    "|E| <= 0.98 for all steps", which this satisfies, so G1 is a PASS.
+    This windowed-trend concern was ADDED AFTER seeing the fixed run and
+    is NOT a pre-registered rule; it is reported as an observation, not
+    as a gate. It is nonetheless the thing that most warrants follow-up,
+    because it is the same self-excitation signature the criterion was
+    written to catch, and it did not appear in E13 (which was leaky).
+
+    PE max 33.1564 at step 430, final 20.138 -- LOWER than E13's 38.862.
+    So PE growth is not leak-driven: the fixed code plateaus earlier and
+    lower. E16 remains open either way.
+Interpretation:
+    The gate fails on trend, not on level. The gain is inside the
+    operational band and the loss converges normally, but the gain is
+    climbing at 5.7e-04/step and the state is drifting up toward the
+    abort bound. E13 (leaky) showed a NEGATIVE gain slope and a max|E|
+    that decayed; the fixed code shows the opposite in both. Whether that
+    is the leak's removal changing the optimisation, or run-to-run
+    variation at a single seed, is not established by one seed.
+Limitations:
+    SINGLE SEED (42), same as E13, so the two runs share a seed and differ
+    only in the one-index fix. TOY SCALE. 1000 steps.
+    The G2 band [1.0, 2.0] is an OPERATIONALIZATION of "gain near 1.5"
+    chosen for this re-evaluation, not original wording; a different band
+    would change the G2 verdict.
+    No B'-s42 rerun was performed: the user's protocol gates it on this
+    result, and this result is FAIL.
+```
+
+---
+
 ## NOT YET RUN
 
 **E14 — 3-seed B' A/B comparison.** GATE MET by E13, but not launched.
