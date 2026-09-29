@@ -235,21 +235,26 @@ def causality():
             y2 = y.clone()
             y2[:, p] = (y2[:, p] + 137) % 256
             hm = m(x, y2, E_t_external=None)["hidden_mod"]
-            check("perturb targets[.,%d] -> hidden_mod[:, :%d] identical"
-                  % (p, p),
-                  torch.equal(base_hm[:, :p, :], hm[:, :p, :]))
-        # Control: position p MUST change. Without this, the checks above
-        # could pass simply because the perturbation does nothing.
-        y2 = y.clone()
-        y2[:, 5] = (y2[:, 5] + 137) % 256
-        hm = m(x, y2, E_t_external=None)["hidden_mod"]
-        check("control: position 5 DOES change (perturbation is live)",
-              not torch.equal(base_hm[:, 5, :], hm[:, 5, :]))
+        # film_state[q] may depend on y[j] only for j < q, so changing y[:,p]
+        # must leave positions <= p untouched. The old bound was [:p] and its
+        # control asserted position p DID move, i.e. the test encoded the leak.
+        check("perturb targets[.,%d] -> hidden_mod[:, :%d] identical"
+              % (p, p + 1),
+              torch.equal(base_hm[:, :p + 1, :], hm[:, :p + 1, :]))
+    # Control: the perturbation must be live. The recurrence is cumulative, so
+    # y[:,5] has to move SOME later position. Without this, the checks above
+    # could pass simply because the perturbation does nothing.
+    y2 = y.clone()
+    y2[:, 5] = (y2[:, 5] + 137) % 256
+    hm = m(x, y2, E_t_external=None)["hidden_mod"]
+    check("control: some position > 5 DOES change (perturbation is live)",
+          any(not torch.equal(base_hm[:, q, :], hm[:, q, :])
+              for q in (6, 7, 15, 40) if q < base_hm.size(1)))
 
 
-class _StubTok:
-    """Engine only needs a tokenizer for the chat/generate paths. This test
-    drives _rda_forward directly, so these are never called."""
+def _StubTok():
+    """Tokenizer stub for the KV-cache path. Engine._rda_forward drives
+    _rda_forward directly, so these are never called."""
     def encode_special(self, s): return 0
     def get_bos_token_id(self): return 0
 

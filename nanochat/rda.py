@@ -897,9 +897,36 @@ class GPTWithRDA(nn.Module):
             mode = "reset"
         E_next = E_t
         # Position-wise scalar PE, aligned with pre_outcome_hidden.
+        #
+        # THE INDEX HERE IS THE WHOLE LEAK SURFACE. Read this before changing
+        # it. The dataloader makes y[p] == x[p+1] exactly, and gpt.py scores
+        # cross_entropy(logits[p], targets[p]) with NO shift, so y[p] is the
+        # label attached to position p's logits.
+        #
+        # pe_seq[j] is indexed by the same j as pre_outcome_hidden[:, j] ==
+        # hidden[:, j], i.e. by INPUT position, and E_next_seq[j] is the state
+        # after consuming position j. film_state[p] = E_next_seq[p-1], so
+        # pe_seq[j] reaches position p = j+1 -- exactly one position later.
+        # For that to stay honest, pe_seq[j] must be a function of labels y[i]
+        # with i <= j, because by position j+1 the model has consumed
+        # x[0..j+1] and y[i] = x[i+1] for i <= j.
+        #
+        # Hence targets[:, :-1], NOT targets[:, 1:]. With targets[:, 1:] the
+        # entry pe_seq[j] scored y[j+1] = x[j+2], so film_state[j+1] depended
+        # on x[j+2] and logits[j+1] was built from the very label it is graded
+        # against. diagnostics/test_no_label_leak.py fails on that version and
+        # passes on this one; the comment that used to sit further down
+        # ("pe_seq[:, p-1] depends on token p -- strictly causal") asserted the
+        # opposite of what the code did.
+        #
+        # Semantically this is the standard shifted prediction error: position
+        # j's logits score the token that just arrived, i.e. how surprising the
+        # model's previous prediction turned out to be. That is a quantity the
+        # model can actually know at position j+1, which is what makes it
+        # usable as drive input at all.
         if targets is not None:
             pe_seq = self.state.prediction_error_from_logits(
-                _safe_logits(self.base, hidden, pre_outcome_hidden), targets[:, 1:]
+                _safe_logits(self.base, hidden, pre_outcome_hidden), targets[:, :-1]
             )
         else:
             pe_seq = torch.zeros(
@@ -955,19 +982,42 @@ class GPTWithRDA(nn.Module):
         #
         # Position p is modulated by E_start for p == 0 and by E_next_seq[p-1]
         # for p >= 1 -- i.e. by the state as it stood BEFORE the update that
-        # consumed position p.
+        # consumed position p-1.
         #
-        # The tempting alternative, E_next_seq[p], is WRONG, and not by a small
-        # margin. E_next_seq[p] is built from pe_seq[:, p], and pe_seq[:, p] is
-        # the prediction error of the MODEL'S OWN PROBABILITY FOR TOKEN p+1
-        # against targets[p+1]. So E_next_seq[p] depends on token p+1, and
-        # modulating position p with it lets position p's hidden state -- and
-        # therefore the logits that predict token p+1 -- depend on token p+1.
-        # That is a one-token lookahead leak, and it inflates val loss, because
-        # at eval time that token does not exist yet.
+        # THE INVARIANT. Because y[p] == x[p+1] and gpt.py scores
+        # cross_entropy(logits[p], targets[p]) with no shift, the requirement
+        # is precisely:
         #
-        # E_next_seq[p-1] depends on pe_seq[:, p-1], which depends on token p --
-        # a token position p has already consumed. Strictly causal.
+        #     film_state[p] may depend on y[j] only for j < p.
+        #
+        # Equivalently, since y[j] == x[j+1], film_state[p] may depend on
+        # x[0..p] and nothing beyond -- exactly the input a causal transformer
+        # position p is entitled to.
+        #
+        # HOW THAT IS ACHIEVED. pe_seq is now built from targets[:, :-1] (see
+        # the comment at its construction above), so pe_seq[j] scores y[j] and
+        # E_next_seq[j] depends on y[0..j]. film_state[p] = E_next_seq[p-1]
+        # therefore depends on y[0..p-1], which is y[j] for j < p. Satisfied.
+        #
+        # WHAT WAS HERE BEFORE, AND WHY IT WAS WRONG. The previous version of
+        # this comment read:
+        #
+        #     "E_next_seq[p] is built from pe_seq[:, p], and pe_seq[:, p] is
+        #      the prediction error of the model's own probability for token
+        #      p+1 against targets[p+1] ... E_next_seq[p-1] depends on
+        #      pe_seq[:, p-1], which depends on token p -- strictly causal."
+        #
+        # Both halves of that reasoning were correct about the MECHANISM and
+        # wrong about the ARITHMETIC. pe_seq[:, p-1] did depend on
+        # targets[p] -- but targets[p] IS x[p+1], not x[p]. So the state
+        # modulating position p had already seen the token that position p is
+        # scored on. The reasoning checked the index and then mislabelled what
+        # lives at that index.
+        #
+        # The one-token lookahead that the old comment worried about (using
+        # E_next_seq[p] instead of E_next_seq[p-1]) is real and is still avoided
+        # -- that part of the design is unchanged and still necessary. The bug
+        # was in the PE index underneath it, not in this shift.
         # ------------------------------------------------------------------
         film_state = torch.cat([E_start.unsqueeze(1), E_next_seq], dim=1)  # (B, T, n_drives)
         assert film_state.size(1) == hidden.size(1), (

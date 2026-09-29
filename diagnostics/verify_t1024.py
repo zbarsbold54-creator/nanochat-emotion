@@ -179,11 +179,24 @@ def causality(device, positions=(1, 100, 500, 1022, 1023)):
             y2 = y.clone()
             y2[:, p] = (y2[:, p] + 137) % V
             hm = m(x, y2, E_t_external=None)["hidden_mod"]
-            check("perturb targets[.,%4d] -> hidden_mod[:, :%4d] identical"
-                  % (p, p), torch.equal(ref[:, :p, :], hm[:, :p, :]))
-            # CONTROL: the position under test must actually move.
-            moved = not torch.equal(ref[:, p, :], hm[:, p, :])
-            check("  control: position %4d DOES change" % p, moved)
+        # film_state[q] may depend on y[j] only for j < q, so changing y[:,p]
+        # must leave positions <= p untouched. (Before the label-leak fix this
+        # was checked as [:p], which was too weak AND had a control asserting
+        # the opposite -- the leak made position p move.)
+        check("perturb targets[.,%4d] -> hidden_mod[:, :%4d] identical"
+              % (p, p + 1), torch.equal(ref[:, :p + 1, :], hm[:, :p + 1, :]))
+        # CONTROL: the perturbation must be live, i.e. it must reach SOME
+        # later position. The recurrence is cumulative, so y[p] affects every
+        # q > p. If nothing moved the check above would pass vacuously.
+        # At p == T-1 there IS no later position, so the control is not
+        # applicable -- perturbing the final label is legitimately invisible.
+        later = [q for q in (p + 1, p + 2, p + 10) if q < T]
+        if later:
+            moved = any(not torch.equal(ref[:, q, :], hm[:, q, :]) for q in later)
+            check("  control: some position > %4d DOES change (perturbation is live)" % p,
+                  moved)
+        else:
+            print("  [SKIP] control for p=%4d: no position after it" % p)
 
 
 def main():

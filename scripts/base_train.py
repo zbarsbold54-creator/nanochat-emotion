@@ -19,6 +19,7 @@ import json
 import time
 import math
 import argparse
+import subprocess
 from dataclasses import asdict
 from contextlib import contextmanager
 
@@ -35,6 +36,9 @@ from nanochat.loss_eval import evaluate_bpb
 from nanochat.engine import Engine
 from nanochat.flash_attention import HAS_FA3
 from scripts.base_eval import evaluate_core
+
+# Repo root, used to locate the pre-flight regression test.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 print_banner()
 
 # -----------------------------------------------------------------------------
@@ -532,6 +536,40 @@ rda_force_sat = os.environ.get("RDA_FORCE_SAT", "")
 if rda_active:
     from nanochat.rda import GPTWithRDA, document_start_mask, DRIVE_DIMS
     bos_token_id = tokenizer.get_bos_token_id()
+
+    # ---------------------------------------------------------------------
+    # MANDATORY PRE-FLIGHT GATE: no label leak.
+    #
+    # The dataloader makes y[p] == x[p+1], and this script's loss is
+    # cross_entropy(logits[p], targets[p]) with no shift, so y[p] is the
+    # label attached to position p's logits. rda.py used to build pe_seq
+    # from targets[:, 1:], which made film_state[p] a function of y[p]: the
+    # drive state could see the very token it was being graded on. The model
+    # still trained, the loss still fell, and val BPB came out BETTER than
+    # baseline -- so the failure was completely silent, and the B'-s42
+    # canary's 1.226305 (vs baseline 1.301217) was an artifact of it.
+    #
+    # Checking in the entry point rather than only in run_sweep.ps1 because
+    # that file is gitignored: a gate that does not travel with the repo is
+    # not a gate. RDA_NO_LEAK_CHECK=1 exists only for debugging the test
+    # itself and must not be used for a reported run.
+    # ---------------------------------------------------------------------
+    if os.environ.get("RDA_NO_LEAK_CHECK", "") != "1":
+        _leak_rc = subprocess.call(
+            [sys.executable, os.path.join(REPO, "diagnostics", "test_no_label_leak.py")],
+            cwd=REPO,
+        )
+        if _leak_rc != 0:
+            print0("")
+            print0(f"ABORT: test_no_label_leak.py FAILED (exit {_leak_rc}).")
+            print0("The RDA drive state can see the label it is scored on.")
+            print0("Every metric from this run would be invalid. Refusing to start.")
+            sys.exit(1)
+        print0("PRE-FLIGHT: label-leak regression test PASSED")
+    else:
+        print0("WARNING: RDA_NO_LEAK_CHECK=1 -- label-leak gate SKIPPED")
+        print0("WARNING: this run is NOT valid for reporting.")
+
     # Wrap the base model. The state module and predictor need real gradients,
     # so they stay in eager mode.
     rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps)
