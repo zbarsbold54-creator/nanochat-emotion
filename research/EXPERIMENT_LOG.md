@@ -630,7 +630,11 @@ Limitations:
 
 ---
 
-## E13-fixed — 1000-step production confirmation on FIXED code — **FAIL**
+## E13-fixed — 1000-step production confirmation on FIXED code — **VERDICT WITHDRAWN PENDING RE-MEASUREMENT**
+
+> **The G2/G3 verdicts in this entry were computed on the WRONG COLUMN and
+> are withdrawn.** See the correction immediately below. G1 and G4 stand.
+> Re-measurement is in progress as `E13-fixed-3000`.
 
 ```
 Date:        2026-09-29
@@ -643,75 +647,68 @@ Method:      diagnostics/probe_pe_film.py, 1000 steps, production rda.py
              is 0 lines), so the two runs are directly comparable.
 Output:      logs\pe_1000_fixed.json, logs\pe_1000_fixed.txt
 
-VERDICT: FAIL. G1, G2 and G4 pass; G3 fails.
-
+STANDS:
   G1  max|E| <= 0.98 ................................. PASS
       peak 0.9690 at step 921, 0 steps over bound, margin 0.0110
-  G2  applied gain in band [1.0, 2.0] (mid 1.5) ..... PASS
-      mean 1.8821, median 1.8870, min 1.6190, max 2.0760
-  G3  applied gain shows no upward trend ............. FAIL
-      least-squares slope +5.7156e-04 per step (tol 1e-04)
-      3 of 4 windows rising (starts 450, 650, 850)
   G4  loss finite and decreasing .................... PASS
       10.3983 -> 5.1722
 
-Applied gain, 'film s' = max|1 + _unit_rms(film_scale(E), 0.5)|:
-      step    0 : 1.0000
-      step  250 : 1.6190
-      step  500 : 1.7620
-      step  750 : 2.0680
-      step  999 : 2.0620
+WITHDRAWN (wrong column):
+  G2  applied gain in band [1.0, 2.0] ............. WITHDRAWN
+  G3  applied gain no upward trend ............... WITHDRAWN
 
-    WHAT "film s" IS, PRECISELY. It is
-        max over (batch, position, channel) of |1 + _unit_rms(fs, 0.5)|
-    where fs is the captured output of the film_scale module. This is a
-    MAXIMUM over a (B, T, d_model) tensor, NOT an RMS and NOT a mean. The
-    per-position RMS of the applied term is pinned at exactly 0.5 by
-    construction (that is what _unit_rms does), so the only thing that
-    varies across steps is the per-channel SPREAD; the printed number is
-    the extreme channel. That is why it reaches 2.07 while rms(g) is 0.5.
-    It is NOT comparable to the JSON column `film_s_rms`, which is
-    max-independent: film_s_rms is the RMS of the RAW projection, taken
-    BEFORE _unit_rms.
+  max|E| windowed (E_absmax, an unaffected series):
+      300-399 0.9205   400-499 0.8890   500-599 0.9133
+      600-699 0.9459   700-799 0.9594   800-899 0.9642
+      900-999 0.9690
+    Five consecutive rising windows from 500 onward, ending 0.0110 from the
+    0.98 bound. REPORTED AS AN OBSERVATION, NOT A GATE: the pre-registered
+    criterion was only "|E| <= 0.98 for all steps", which passes. This
+    windowed-trend concern was ADDED AFTER seeing the fixed run and is not
+    a pre-registered rule.
 
-    HARNESS NOTE. An earlier pass scored G2/G3 against the JSON
-    `film_s_rms` column and reported a mean of 0.4472 and a near-zero
-    range. That was the wrong column (pre-_unit_rms raw projection, not
-    the applied gain) and the resulting FAIL on G2 was wrong. G2 passes on
-    the correct series. G1 and G3 were unaffected and stand as reported.
-
-    SEPARATE CONCERN, NOT PART OF THE ORIGINAL PASS RULE. max|E| is
-    RISING on the fixed code: 0.9205 / 0.8890 / 0.9133 / 0.9459 / 0.9594
-    / 0.9642 / 0.9690 across 100-step windows 300-399 through 900-999,
-    i.e. five consecutive rising windows from 500 onward, ending 0.0110
-    from the 0.98 abort bound. The original criterion was only
-    "|E| <= 0.98 for all steps", which this satisfies, so G1 is a PASS.
-    This windowed-trend concern was ADDED AFTER seeing the fixed run and
-    is NOT a pre-registered rule; it is reported as an observation, not
-    as a gate. It is nonetheless the thing that most warrants follow-up,
-    because it is the same self-excitation signature the criterion was
-    written to catch, and it did not appear in E13 (which was leaky).
-
-    PE max 33.1564 at step 430, final 20.138 -- LOWER than E13's 38.862.
-    So PE growth is not leak-driven: the fixed code plateaus earlier and
-    lower. E16 remains open either way.
-Interpretation:
-    The gate fails on trend, not on level. The gain is inside the
-    operational band and the loss converges normally, but the gain is
-    climbing at 5.7e-04/step and the state is drifting up toward the
-    abort bound. E13 (leaky) showed a NEGATIVE gain slope and a max|E|
-    that decayed; the fixed code shows the opposite in both. Whether that
-    is the leak's removal changing the optimisation, or run-to-run
-    variation at a single seed, is not established by one seed.
-Limitations:
-    SINGLE SEED (42), same as E13, so the two runs share a seed and differ
-    only in the one-index fix. TOY SCALE. 1000 steps.
-    The G2 band [1.0, 2.0] is an OPERATIONALIZATION of "gain near 1.5"
-    chosen for this re-evaluation, not original wording; a different band
-    would change the G2 verdict.
-    No B'-s42 rerun was performed: the user's protocol gates it on this
-    result, and this result is FAIL.
+  PE max 33.1564 at step 430, final 20.138 -- LOWER than E13's 38.862, so
+  PE growth is NOT leak-driven. E16 remains open.
 ```
+
+### Correction — the gain column was the RAW projection, not the applied gain
+
+Three separate errors were made on this metric before it was got right, and
+all three are recorded because the sequence is the lesson.
+
+1. **First reading.** The JSON column `film_s_rms` was taken to be the gain.
+   It is the RMS of the **raw** `film_scale` output. Mean 0.4472 over
+   250-999. G2 was declared FAIL on that basis.
+2. **Second reading.** The console column `film s` was taken to be the
+   applied gain `1 + _unit_rms(fs, 0.5)`. It is `max|1 + fs|` — also raw,
+   just a max instead of an RMS. G2 was declared PASS on a mean of 1.8821
+   and G3 FAIL on a slope of +5.7156e-04/step. **Both were wrong.**
+3. **What is actually true.** Measured directly in
+   `diagnostics/verify_film_s_definition.py`:
+
+       step |  max|1+fs|  max|1+_unit_rms(fs)|   rms(fs)   rms(_unit_rms(fs))
+          0 |      1.1186              2.5258     0.0426             0.4999
+          3 |      1.1784              2.6666     0.0746             0.5000
+
+   The applied scale is roughly **2x** the raw one. The hook sees the
+   `film_scale` module output; `_unit_rms` is applied afterwards, inside
+   `modulate()`. `rms(_unit_rms(fs))` is pinned at exactly `film_rms = 0.5`
+   by construction, so the only thing that varies is the per-channel
+   spread, and a max-based statistic reports the extreme channel.
+
+**Consequence.** Neither `film_s_rms` nor `mod_scale_absmax` nor the console
+`film s` is the applied gain. The applied gain was not recorded at all, and
+it **cannot be reconstructed** from the stored aggregates, because
+`_unit_rms` needs the per-position channel vector and only min/max/mean/rms
+were kept. G2 and G3 therefore have no valid verdict from this run.
+
+Fixed in `a5eba19`: the probe now records `applied_scale_absmax`,
+`applied_scale_rms`, `applied_shift_*` and an `applied_gain_rms_check` every
+step. Verified on a 3-step smoke run: RAW 1.0255 vs APPLIED 1.5102, with
+`applied_gain_rms_check = 0.4996` against `film_rms = 0.50`.
+
+G1 and G4 are unaffected — `E_absmax` is the raw per-step state norm and has
+nothing to do with the FiLM gain.
 
 ---
 

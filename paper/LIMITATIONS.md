@@ -124,16 +124,31 @@ reportable.
 ## 4b. The fixed code has not yet cleared its own stability gate
 
 The 1000-step confirmation re-run on the fixed code (`E13-fixed`) is
-**FAIL** on trend. `max|E|` peaks at 0.9690 against a 0.98 bound — a margin
-of 0.011 — and *rises* across five consecutive 100-step windows from step
-500 onward, where the leaky E13 run decayed. The applied FiLM gain has a
-positive slope of +5.7e-04/step.
+**incomplete**. Two gates stand and one is withdrawn.
 
-The pre-registered criterion was only `|E| <= 0.98 for all steps`, which
-passes, so the gate fails on the added trend criterion. The distinction is
-recorded because the trend criterion was formulated **after** seeing the
-fixed run and is not a pre-registered rule; it should not be presented as
-though it were.
+**Stand:** `max|E|` peaks at 0.9690 against a 0.98 bound — a margin of
+0.011 — with zero steps over the bound, and the loss falls normally
+(10.3983 → 5.1722). The pre-registered criterion `|E| <= 0.98 for all
+steps` is satisfied.
+
+**Also stands, as an observation rather than a gate:** `max|E|` *rises*
+across five consecutive 100-step windows from step 500 onward, where the
+leaky E13 run decayed. The windowed-trend criterion was formulated **after**
+seeing the fixed run, so it is not pre-registered and is not presented as
+though it were. It is nonetheless the observation most warranting follow-up,
+being the same self-excitation signature the original criterion was written
+to catch.
+
+**Withdrawn:** the two gain gates. The probe recorded the *raw* FiLM
+projection, not the applied gain — `_unit_rms` is applied inside
+`modulate()`, after the forward hook that captures the module output, and
+the two differ by roughly 2× (measured: `max|1+fs|` = 1.12–1.21 against
+`max|1+_unit_rms(fs,0.5)|` = 2.53–2.67). The applied gain was never stored
+and cannot be reconstructed from the aggregates that were. The probe now
+records it (`a5eba19`), and re-measurement is in progress. Three
+successive readings of this metric were all wrong before it was pinned
+down; the sequence is recorded in `research/EXPERIMENT_LOG.md` because the
+error is the kind that a confident, plausible-sounding number hides.
 
 **E16 remains open.** The PE-plateau anomaly is not explained by the leak:
 the fixed run plateaus *earlier and lower* (max 33.16, final 20.14) than
