@@ -404,24 +404,70 @@ Limitations:
 
 ---
 
+## E13 — 1000-step production confirmation — **PASS**
+
+```
+Date:        2026-09-29
+Git commit:  6977c60 (code under test; no code change in this entry)
+Seed:        42
+Config:      depth 8, d_model 768, T=1024, TOY SCALE, 1000 steps
+Question:    Is the PE/FiLM saturation mechanism CONTROLLED rather than
+             merely DELAYED?
+Method:      diagnostics/probe_pe_film.py, 1000 steps, production rda.py
+             with no ablation flags. Console output to logs\pe_1000.txt,
+             per-step records to logs\pe_1000.json.
+Result:
+    max |E| over all 1000 steps      0.9401  at step 254
+    steps with |E| > 0.98            NONE
+    FiLM gain, steps 250-999         mean 1.3617, stdev 0.0386
+                                     min 1.2820, max 1.5781
+    FiLM gain slope (250-999)        -0.000033 / step  (-0.0033 per 100)
+    FiLM gain  0 -> 1.0000
+               250 -> 1.4290
+               500 -> 1.3561
+               750 -> 1.3562
+               999 -> 1.4001
+    PE max    0 -> 10.491
+              250 -> 36.858
+              500 -> 38.733
+              750 -> 38.861
+              999 -> 38.862        (PLATEAUS near 38.9 after ~step 250)
+    loss     10.3983 -> 4.7816
+    post-peak decay, max |E| per 100-step window:
+        250-349  0.9401     350-449  0.9397     450-549  0.9297
+        550-649  0.8977     650-749  0.8511     750-849  0.8143
+        850-949  0.7575     950-999  0.6724
+    windows exceeding the previous window's max   NONE
+Interpretation:
+    PASS on both pre-registered criteria.
+    1. |E| <= 0.98 for all 1000 steps, with 0.040 of margin.
+    2. FiLM gain is stationary around 1.36 and the slope is NEGATIVE, so
+       the specific failure mode the criterion was written to catch --
+       gain drifting upward while |E| stays under threshold -- is absent.
+
+    On "controlled vs delayed": in the unstabilized configuration |E|
+    crossed 0.98 at step 217 and was rising. Here |E| PEAKS at step 254 and
+    then decays monotonically in every 100-step window, to 0.6724 by step
+    999 -- a factor of 1.4 below its own peak while training continues. A
+    delayed ratchet can only arrive later; it cannot fall. Combined with
+    the flat-to-negative gain slope, the mechanism is controlled.
+
+    Incidental: PE plateaus near 38.9 after ~step 250 rather than growing
+    without bound. This partially answers the E16 anomaly -- the growth
+    self-limits -- but does not explain it.
+Limitations:
+    SINGLE SEED (42). TOY SCALE (depth 8, d_model 768), not the real B'
+    configuration. 1000 steps is still far shorter than a production
+    training run, so this is evidence, not proof. The stronger control is
+    the saturation abort enabled on the real training job.
+    The 375 raw step-to-step increases after the peak are ordinary
+    sampling noise in max|E|; the windowed test is the meaningful one.
+```
+
+---
+
 ## NOT YET RUN
 
-**E13 — 1000-step production confirmation.** THE GATE.
+**E14 — 3-seed B' A/B comparison.** GATE MET by E13, but not launched.
+Awaiting explicit go-ahead. Do not launch seeds 43/44 without instruction.
 
-Saturation previously began at step 217. 250 steps cannot distinguish
-"controlled" from "delayed". Required before the 3-seed A/B.
-
-**E14 — 3-seed B' A/B comparison.** Blocked on E13.
-
-Command for E13, when resuming:
-
-```
-cd C:\AI\nanochat
-$env:PYTHONIOENCODING="utf-8"; $env:PYTHONUTF8="1"
-$env:PYTHONUNBUFFERED="1"; $env:PYTHONPATH="C:\AI\nanochat"
-$env:NANOCHAT_DATASET="fineweb-edu"
-.\.venv\Scripts\python.exe diagnostics\probe_pe_film.py --steps 1000 `
-  --label "E13 1000-step production confirmation" --out logs\pe_1000.json
-```
-
-Report: first step |E|>0.98, max|E|, FiLM gain max, loss curve.
