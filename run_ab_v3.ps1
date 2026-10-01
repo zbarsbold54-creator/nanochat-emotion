@@ -14,6 +14,15 @@ $ErrorActionPreference = "Stop"
 $py = ".\.venv\Scripts\python.exe"
 Set-Location "C:\AI\nanochat"
 
+# Per-run wall-clock cap in SECONDS. 90 min = 5400 s. Stored in seconds so the
+# timeout-path self-test can pass a 5-second limit without a fractional-minute
+# value rounding to 0 (an earlier draft printed "TIMEOUT after 0 min").
+$TIMEOUT_SECONDS = 5400
+
+# Literal text required in the log on expiry. Derived from the cap rather than
+# hardcoded, so it can never disagree with the value actually enforced.
+$TIMEOUT_LABEL = "TIMEOUT after {0} min" -f [int]($TIMEOUT_SECONDS / 60)
+
 # Local shards + UTF-8 console. Without the second, base_train.py dies on a
 # cp1252 encode error printing a proportionality sign.
 $env:NANOCHAT_DATASET = "fineweb-edu"
@@ -44,15 +53,64 @@ function Build-Cmd([string]$arm, [int]$seed) {
 # Write-Host, NOT Write-Output: Write-Output lands on the success stream, which
 # the caller captures TOGETHER with the exit code, so the function would return
 # Object[] [EXEC line, exitcode] and every [int] use would fail.
-function Invoke-Run([string]$py, [string[]]$argv, [string]$log) {
+#
+# TIMEOUT: waits up to $TimeoutMinutes for the process, then kills the whole
+# tree. Start-Process -Wait has no timeout of its own, so the wait is done
+# with Wait-Process -Timeout, which throws on expiry. The throw is caught
+# below and turned into a halt; it must NOT be allowed to escape, because
+# $ErrorActionPreference = "Stop" would abort the driver mid-run and skip the
+# JSON write, losing every completed run.
+#
+# KILLING THE TREE, NOT JUST THE PARENT: the venv launcher (.venv\Scripts\
+# python.exe) is a shim that spawns the REAL interpreter as a child (observed:
+# shim PID 16904 -> interpreter PID 31736). Killing only the shim orphans the
+# interpreter, which keeps the GPU and the log file handle alive. That is why
+# the earlier manual stop had to hunt for the child by command line. stop -Id
+# on the parent plus taskkill /T on it covers both.
+function Invoke-Run([string]$py, [string[]]$argv, [string]$log, [int]$TimeoutSeconds, [string]$TimeoutLabel) {
     $out = "$log.out"
     $err = "$log.err"
     $exe = (Resolve-Path $py).Path
     $argLine = ($argv -join ' ')
     Write-Host ("EXEC: {0} {1}" -f $exe, $argLine)
     $p = Start-Process -FilePath $exe -ArgumentList $argLine `
-                       -NoNewWindow -Wait -PassThru `
+                       -NoNewWindow -PassThru `
                        -RedirectStandardOutput $out -RedirectStandardError $err
+    # CACHE THE PROCESS HANDLE. Without this, .ExitCode reads as $null for any
+    # process that has already exited by the time it is queried -- PowerShell
+    # cannot get the exit code from a handle it never held, and the process
+    # object reports an empty ExitCode rather than throwing. Verified directly:
+    # `cmd /c exit 5` gave ExitCode=[] with no cached handle and ExitCode=[5]
+    # once $p.Handle was touched. Touching .Handle is the documented way to
+    # make the value available, and it costs nothing.
+    $null = $p.Handle
+    $timedOut = $false
+    # POLLING, NOT Wait-Process. Wait-Process -Timeout raises when the PID can
+    # no longer be found, which is ALSO what happens when a process exits
+    # quickly and is reaped before the wait begins. A self-test with
+    # `cmd /c exit 0` reproduced exactly that: the process was gone on arrival
+    # and the run was wrongly reported as a timeout. Checking HasExited first
+    # and then polling removes the race entirely and makes the deadline exact.
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while (-not $p.HasExited) {
+        if ((Get-Date) -ge $deadline) { $timedOut = $true; break }
+        # Poll often enough that a kill lands promptly, cheaply enough not to
+        # matter. Sleep first so a process that exits instantly is not polled.
+        Start-Sleep -Milliseconds 500
+    }
+    if ($timedOut) {
+        Write-Host ("{0} -- killing process tree for PID {1}" -f $TimeoutLabel, $p.Id)
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+        # /T kills the whole tree, which is what reclaims the GPU.
+        try { & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null } catch {}
+        # Give the OS a moment to release the GPU context and file handles so
+        # the folded log is not written while the child still holds $log.out.
+        Start-Sleep -Seconds 3
+        try { $p.WaitForExit(15000) | Out-Null } catch {}
+        Add-Content -Path $log -Encoding utf8 -Value $TimeoutLabel
+        return [int]124
+    }
+    $p.WaitForExit()
     return $p.ExitCode
 }
 
@@ -125,6 +183,8 @@ $results = [ordered]@{
     }
     runs        = [ordered]@{}
     halted      = $null
+    timeout_seconds_per_run = $TIMEOUT_SECONDS
+    timeout_label = $TIMEOUT_LABEL
 }
 
 foreach ($r in $order) {
@@ -157,8 +217,11 @@ foreach ($r in $order) {
     Set-Content -Path $log -Value $stamp -Encoding utf8
 
     $t0 = Get-Date
-    $code = Invoke-Run $py $argv $log
+    $code = Invoke-Run $py $argv $log $TIMEOUT_SECONDS $TIMEOUT_LABEL
     $wall = [math]::Round(((Get-Date) - $t0).TotalMinutes, 2)
+    # 124 is the conventional timeout status and is distinct from any real
+    # exit code, so it is checked BEFORE the generic nonzero-exit branch.
+    $timedOut = ($code -eq 124)
 
     Add-Content -Path $log -Value "" -Encoding utf8
     Add-Content -Path $log -Value "===== STDOUT =====" -Encoding utf8
@@ -174,6 +237,24 @@ foreach ($r in $order) {
         $r.label, $code, $wall, $trainMin, $bpb)
 
     $isNan = ($bpb -ne $null) -and ([double]::IsNaN($bpb) -or [double]::IsInfinity($bpb))
+    if ($timedOut) {
+        Write-Output ("ABORT: {0} {1} (cap {2} s = {3} min, wall {4} min)." -f `
+            $r.label, $TIMEOUT_LABEL, $TIMEOUT_SECONDS, ($TIMEOUT_SECONDS / 60), $wall)
+        $results.halted = [ordered]@{
+            label  = $r.label
+            arm    = $r.arm
+            seed   = $r.seed
+            exit   = $code
+            timed_out = $true
+            timeout_seconds = $TIMEOUT_SECONDS
+            wall_minutes = $wall
+            bpb    = $bpb        # $null: no step-00600 line, run was incomplete
+            nan    = $isNan
+            reason = $TIMEOUT_LABEL
+            log    = $log
+        }
+        break
+    }
     if ($isNan -or $code -ne 0 -or $bpb -eq $null) {
         $reason = if ($isNan) { "non-finite BPB" } elseif ($bpb -eq $null) { "BPB line missing" } else { "nonzero exit" }
         Write-Output ("ABORT: {0} failed. exit={1} bpb={2} reason={3}" -f $r.label, $code, $bpb, $reason)
