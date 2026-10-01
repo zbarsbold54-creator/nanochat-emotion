@@ -92,6 +92,14 @@ parser.add_argument("--seed", type=int, default=42,
 # Regulatory Drive Architecture / RDA (opt-in; off = original training path, unchanged)
 parser.add_argument("--rda", action="store_true",
                     help="wrap the model in GPTWithRDA and carry regulatory drive state across micro-steps within an episode")
+parser.add_argument("--rda-const-state", action="store_true",
+                    help="CONTROL ARM C: keep every RDA module, parameter and the "
+                         "recurrence exactly as in --rda, but hand FiLM a LEARNED "
+                         "CONSTANT vector (nn.Parameter of shape [8], init N(0,0.3^2)) "
+                         "broadcast over batch and positions instead of the "
+                         "per-position state. FiLM then carries no text-dependent "
+                         "and no position-dependent information. Requires --rda; "
+                         "has NO effect without it. Default OFF.")
 parser.add_argument("--rda-debug-steps", type=int, default=200,
                     help="number of steps to log E_t / E_hat_next / E_next / dpe norms")
 parser.add_argument("--rda-drive-wd", type=float, default=0.01,
@@ -589,10 +597,28 @@ if rda_active:
 
     # Wrap the base model. The state module and predictor need real gradients,
     # so they stay in eager mode.
-    rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps)
+    #
+    # --rda-const-state is OPT-IN and DEFAULT OFF. When it is off,
+    # `const_state=False` is passed and GPTWithRDA sets
+    # `self.const_state_vec = None`, so the forward pass uses `film_state`
+    # verbatim and is BIT-IDENTICAL to plain --rda. Guarded so that passing the
+    # flag without --rda is a loud error rather than a silent no-op.
+    if args.rda_const_state and not args.rda:
+        print0("ABORT: --rda-const-state requires --rda (it is a control arm for it).")
+        sys.exit(1)
+    rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps,
+                           const_state=args.rda_const_state,
+                           const_state_seed=args.seed)
     rda_model = rda_model.to(device)
     model = rda_model
     print0(f"RDA ENABLED | n_drives=8 | decay=0.95 | persistence=decay-only | debug_steps={args.rda_debug_steps}")
+    if args.rda_const_state:
+        _cv = rda_model.const_state_vec
+        print0("RDA CONTROL ARM C | FiLM input = LEARNED CONSTANT (no state information)")
+        print0("  const_state_vec shape=%s init=%s" % (
+            list(_cv.shape), ["%+.6f" % v for v in _cv.detach().tolist()]))
+        print0("  NOTE: +8 parameters vs B'. The drive/recurrence still runs but "
+               "is now UNTRAINED (no gradient path from the loss).")
 
     # ---------------------------------------------------------------------
     # Optimizer coverage for the RDA parameters.
@@ -618,6 +644,13 @@ if rda_active:
     _state_matrix = (list(rda_model.state.film_scale.parameters())
                      + list(rda_model.state.film_shift.parameters()))
     _state_vector = [rda_model.state.e_init]
+    # CONTROL ARM C: the learned constant that replaces the per-position state
+    # at FiLM. It MUST be enrolled in a group or the coverage assertion below
+    # raises, and it MUST be enrolled for real: it is the one arm-C parameter
+    # that actually receives gradient, so leaving it out would freeze FiLM's
+    # only input. Same kind/scalar-LR treatment as e_init, weight_decay 0.
+    if rda_model.const_state_vec is not None:
+        _state_vector = _state_vector + [rda_model.const_state_vec]
     _predictor_matrix = list(rda_model.predictor.parameters())
 
     # event_proj / pe_proj get their OWN group with an explicit, small weight
@@ -730,6 +763,31 @@ if rda_active:
     # consumes them.
     _grad_free = {id(rda_model.state.e_init)} | {
         id(p) for p in rda_model.predictor.parameters()}
+    # CONTROL ARM C ONLY. When the FiLM input is a learned constant, nothing in
+    # the loss depends on E any more, so the drive projections get NO gradient
+    # at all (verified: autograd prunes them, p.grad is None, not a zero
+    # tensor). MuonAdamW._compute_adamw calls grad.float() unconditionally and
+    # crashes on grad=None (optim.py:73), so they must be listed here or arm C
+    # dies on the first optimizer step.
+    #
+    # IMPORTANT: listing them here makes the step SAFE, not FROZEN. `grad_free`
+    # is read ONLY by the zero-grad priming at base_train.py:935-940 --
+    # optim.py never sees the key. These params stay in the state.* group with
+    # weight_decay=args.rda_drive_wd, and adamw_step_fused applies decoupled
+    # decay unconditionally (optim.py:75, p32.mul_(1 - lr*wd)) before it ever
+    # looks at the gradient. Measured over 3 steps at lr=3e-3, wd=0.01: every
+    # one of the six tensors shrank by exactly (1-3e-5)^3, matching the
+    # predicted scale 0.999910003 to 1.8e-7. See
+    # diagnostics/probe_arm_c_decay.py. So "grad-free" here means "gets no
+    # update", NOT "stays bit-identical to init".
+    #
+    # SCOPE: guarded on the flag, so with --rda-const-state OFF this list is
+    # BYTE-FOR-BYTE the same two entries as before and baseline and B' are
+    # unaffected.
+    if args.rda_const_state:
+        _grad_free = _grad_free | {id(p) for p in rda_model.state.event_proj.parameters()} \
+                                   | {id(p) for p in rda_model.state.pe_proj.parameters()} \
+                                   | {id(p) for p in rda_model.state.h_norm.parameters()}
     for _g in optimizer.param_groups:
         if any(id(p) in _grad_free for p in _g["params"]):
             _g["grad_free"] = True
@@ -1082,6 +1140,45 @@ print0(f"Peak memory usage: {get_max_memory() / 1024 / 1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
 if val_bpb is not None:
     print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
+
+# ---- CONTROL ARM C: end-of-run const_state_vec report --------------------
+# LOGGING ONLY. Reads two tensors that already exist, runs no forward pass,
+# consumes no RNG, and writes nothing the training loop reads back. So it
+# cannot change training behaviour: the values printed here are the values
+# that were already in memory when the loop exited.
+#
+# Why it matters: const_state_vec is the ONLY thing that distinguishes arm C
+# from arm B'. If it never moved from its init, arm C was not a control at all
+# but a re-parameterisation of the zero-init, and the whole comparison would
+# be void. So the movement is a first-class result, not a diagnostic.
+if rda_active and rda_model.const_state_vec is not None:
+    _cv_final = rda_model.const_state_vec.detach().float().cpu().tolist()
+    _cv_init = rda_model.const_state_vec_init  # captured before any step
+    _cv_delta = [f - i0 for f, i0 in zip(_cv_final, _cv_init)]
+    print0("const_state_vec final : " + " ".join("%+.6f" % v for v in _cv_final))
+    print0("const_state_vec init  : " + " ".join("%+.6f" % v for v in _cv_init))
+    print0("const_state_vec delta : " + " ".join("%+.6e" % v for v in _cv_delta))
+    _cv_absmax = max(abs(v) for v in _cv_delta)
+    print0("const_state_vec max|delta| = %.6e  (moved from init: %s)"
+           % (_cv_absmax, _cv_absmax > 0.0))
+    # dims are DRIVE_DIMS order; printed by name so a reader cannot misattribute
+    for _nm, _f, _d in zip(DRIVE_DIMS, _cv_final, _cv_delta):
+        print0("    %-18s final %+.6f  delta %+.6e" % (_nm, _f, _d))
+    _cv_path = os.path.join("logs", "ab_v3_const_state_s%d.json" % args.seed)
+    try:
+        with open(_cv_path, "w") as _f:
+            json.dump({"seed": args.seed,
+                       "dims": list(DRIVE_DIMS),
+                       "init": _cv_init,
+                       "final": _cv_final,
+                       "delta": _cv_delta,
+                       "max_abs_delta": _cv_absmax,
+                       "final_val_bpb": None if val_bpb is None else float(val_bpb),
+                       "num_iterations": int(num_iterations)},
+                      _f, indent=2)
+        print0("const_state_vec written to %s" % _cv_path)
+    except Exception as _e:  # logging must never kill a finished run
+        print0("const_state_vec JSON write FAILED: %r" % (_e,))
 
 # cleanup
 wandb_run.finish() # wandb run finish

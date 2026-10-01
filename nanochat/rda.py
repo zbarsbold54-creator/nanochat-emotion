@@ -655,7 +655,8 @@ class GPTWithRDA(nn.Module):
     """
 
     def __init__(self, base_model, n_drives: int = N_DRIVES, decay: float = 0.95,
-                 debug_steps: int = 200, check_leakage: bool = True):
+                 debug_steps: int = 200, check_leakage: bool = True,
+                 const_state: bool = False, const_state_seed: int = 0):
         super().__init__()
         self.base = base_model
         d_model = base_model.config.n_embd
@@ -665,6 +666,40 @@ class GPTWithRDA(nn.Module):
         self.predictor = RDAPredictor(d_model, n_drives=n_drives)
         self.debug_steps = debug_steps
         self.check_leakage = check_leakage
+        # CONTROL ARM C. When true, the tensor handed to FiLM is a learned
+        # constant vector instead of the per-position state, so FiLM receives
+        # no text-dependent and no position-dependent information.
+        #
+        # DEFAULT IS None, i.e. the flag is OFF and `film_state` is used
+        # verbatim, so baseline and B' are bit-identical to before.
+        #
+        # WHY NON-ZERO INIT. FiLM's weights are ZERO-INITIALISED, so a
+        # zero-initialised c would give d(loss)/dc = 0 AND leave
+        # d(loss)/dW = 0 (the product W*c is zero and its gradient is
+        # proportional to c). That is a saddle: neither c nor W could ever
+        # move, and C would be weaker than B' for a reason that has nothing
+        # to do with information. Drawing c ~ N(0, 0.3^2) breaks the saddle
+        # while still carrying no per-token information.
+        #
+        # WHY A DEDICATED GENERATOR. Drawing from the global RNG here would
+        # CONSUME 8 numbers from whatever stream the caller is using, shifting
+        # every subsequent draw. Anything initialised after this point would
+        # then differ between B' and C at step 0 for a reason that has nothing
+        # to do with the arm -- and the data order/shuffling is seeded off
+        # that same global stream. A private generator makes the draw
+        # independent: every parameter that exists in B' is bit-identical at
+        # init in C, verified with torch.equal over the shared named set.
+        self.const_state_vec = None
+        if const_state:
+            _g = torch.Generator(device="cpu")
+            _g.manual_seed(int(const_state_seed) + 1000003)
+            _cv = torch.randn(n_drives, generator=_g, dtype=torch.float32) * 0.3
+            self.const_state_vec = nn.Parameter(_cv)
+            # Plain-python copy of the init, for the end-of-run report in
+            # base_train.py. Taken here, before any optimizer step can touch
+            # it, and never read by the forward path -- so it is inert with
+            # respect to training.
+            self.const_state_vec_init = [float(v) for v in _cv.tolist()]
         self._debug_count = 0
         # Records the last leakage-check result so a caller can audit it.
         self.last_leakage_check = None
@@ -1024,6 +1059,17 @@ class GPTWithRDA(nn.Module):
             f"film_state has {film_state.size(1)} positions but hidden has "
             f"{hidden.size(1)}"
         )
+
+        # CONTROL ARM C. Swap the per-position state for a learned constant
+        # BEFORE it reaches FiLM. Everything above still runs -- the drive,
+        # the recurrence, the predictor, dpe -- so compute is unchanged and the
+        # comparison against B' isolates INFORMATION rather than capacity or
+        # cost. Only this one tensor differs.
+        #
+        # expand_as returns a VIEW, so this allocates nothing, and .to(dtype)
+        # is a no-op when the dtypes already match.
+        if self.const_state_vec is not None:
+            film_state = self.const_state_vec.to(film_state.dtype).expand_as(film_state)
 
         # Mean over positions for a compact (B, n_drives) summary signal.
         # In single-token decode these sequences are empty, and the mean of an
