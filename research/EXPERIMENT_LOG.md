@@ -2152,3 +2152,133 @@ withdrawn 1.226305 came from `b-stab-s42` at commit `6ae93ce`, which is the
 commit immediately BEFORE the fix `969e067`. Read-only detail in
 `research/AB_SETUP_READONLY.md`.
 
+## E17-AB-v2 (post-leak-fix A/B) — **B' BEATS BASELINE; the effect is real**
+
+> ID note: this is **E17**, not E16. E16 is referenced five times in this file
+> as "the E16 anomaly" (the PE plateau, still open) but has no entry heading of
+> its own, so the number is treated as taken.
+
+Date: 2026-10-01. Sweep commit `f2729386cdb74930a520914a90ba541ed6f459dd`.
+Pre-flight `diagnostics/test_no_label_leak.py` **PASS**, exit 0, all three
+causality checks. `git merge-base --is-ancestor 969e067 HEAD` confirms the leak
+fix is in HEAD. Driver `run_ab_v2.ps1`.
+
+METRIC: validation BPB at the FINAL step (600), parsed from
+`Step 00600 | Validation bpb:` (`scripts/base_train.py:740`). Deliberately NOT
+`Minimum validation bpb` (line 1065), which is the best checkpoint. Both arms
+use the identical `evaluate_bpb(model, val_loader, eval_steps, token_bytes)`
+path. The `{:05d}` format renders step 600 as `00600`, not `06000`.
+
+Flags, identical in both arms except `--rda`: `--depth=8 --aspect-ratio=96
+--head-dim=128 --max-seq-len=1024 --window-pattern=L --device-batch-size=4
+--total-batch-size=32768 --num-iterations=600 --eval-every=50
+--eval-tokens=524288 --core-metric-every=-1 --sample-every=-1`.
+So d_model = 768, T = 1024. Order interleaved to limit machine drift:
+A42 B42 A43 B43 A44 B44 A42-repeat.
+
+| seed | baseline | B' | paired diff (B' - baseline) |
+|---|---|---|---|
+| 42 | 1.300643 | 1.278289 | **-0.022354** |
+| 43 | 1.287503 | 1.274878 | **-0.012625** |
+| 44 | 1.294832 | 1.275739 | **-0.019093** |
+
+    baseline s42 repeat   1.300576   difference -0.000067
+    mean |paired diff|               0.018024
+
+VERDICT (criterion declared before the sweep: all three paired diffs the same
+sign AND mean |diff| above both the repeat difference and 0.0137):
+
+    all three same sign      YES (all negative)
+    mean |diff| > |repeat|   0.018024 > 0.000067   (269x)
+    mean |diff| > 0.0137      YES
+    ==> EFFECT IS REAL
+
+**SEED 43 ALONE IS BELOW 0.0137** (-0.012625). It clears only because it is
+averaged with seeds 42 and 44. A single-seed B/B' comparison at this step count
+would NOT have established the effect.
+
+**THE REPEAT IS NOT THE SEED SPREAD.** The s42 repeat measures run-to-run
+NONDETERMINISM on ONE seed and came out at 0.000067. The 0.0137 figure is
+seed-to-seed variation across three DIFFERENT seeds (E1). They are different
+quantities and are not interchangeable; the criterion uses both because they
+bound different things. The 269x ratio between them is a fact about this sweep,
+not a general constant.
+
+**EQUAL STEPS ARE NOT EQUAL COMPUTE.** Baseline runs took 12.2-12.3 min;
+B' runs took 24.1-29.1 min, i.e. roughly 2.4x. The B' arm is doing
+substantially more work per step (the FiLM path plus the vectorized recurrence),
+so this A/B compares two different compute budgets, not two architectures at
+matched cost. A cost-matched comparison is NOT what was run and would be a
+different experiment.
+
+### TWO INFRASTRUCTURE FINDINGS
+
+**1. A LATENT NameError MADE THE BASELINE ARM UNRUNNABLE.** `base_train.py`
+referenced `_rda_diag_lr_scale` at line 941, in the per-step LR rescale that
+runs for EVERY step of EVERY run, but defined it at line 680 nested inside
+`if rda_active:` (line 536). Any run WITHOUT `--rda` died at the first optimizer
+step with `NameError: name '_rda_diag_lr_scale' is not defined`.
+
+`git log -S"_rda_diag_lr_scale" -- scripts/base_train.py` returns exactly ONE
+commit, `ab9b560` ("Stabilize the RDA state", 2026-09-28), and `git blame`
+attributes both halves to it. Its diff shows
+`-group["lr"] = group["initial_lr"] * lrm` becoming
+`+group["lr"] = group["initial_lr"] * lrm * _rda_diag_lr_scale`, with the
+definition indented under the RDA block. Invisible to the arm being run at the
+time, because `b-stab-s42` passed `--rda`.
+
+Fixed in `f272938` by initialising it above the `if rda_active:` block. Default
+stays 1.0, so the value reaching line 941 is identical for `--rda` runs (same
+default, same `RDA_STATE_LR` override path), and a baseline's learning rates are
+UNCHANGED (`initial_lr * lrm * 1.0` is the pre-`ab9b560` expression).
+
+**CONFIRMED EMPIRICALLY BY THIS SWEEP:** the three baselines reproduce E1 to
+within 0.00057 (1.300643/1.287503/1.294832 vs 1.301217/1.287544/1.295109).
+That is independent evidence the fix changed no baseline arithmetic.
+
+**2. THE OLD BASELINE LOGS WERE NOT TRUNCATED — THEY ARE MIXED-ENCODING.**
+This corrects an earlier claim in this work that `logs/a_s42.log`, `a_s43.log`
+and `a_s44.log` were "truncated" by a pipe closing early. They are NOT
+truncated and did NOT fail: each ran the full 600 steps and ends with
+`Minimum validation bpb:` 1.301217 / 1.287544 / 1.295109, `Total training time:`
+9.98 / 9.94 / 9.93 m, and a saved `optim_000600_rank0.pt`. They ran at commit
+`030a384`, which PREDATES `ab9b560`, which is why they were unaffected.
+
+They *appeared* empty because each file is MIXED-ENCODING: a UTF-8 header
+written by `Set-Content -Encoding utf8`, followed by a UTF-16LE body appended by
+`Tee-Object`. Read as UTF-8 you get the header and nothing else; read as
+`[System.Text.Encoding]::Unicode.GetString(bytes)` you get everything. That is a
+third defect, in `run_sweep.ps1`'s logging, not in training. `research/
+AB_SETUP_READONLY.md` has been corrected accordingly.
+
+### WHAT THIS DOES AND DOES NOT SHOW
+
+**IT DOES NOT SHOW THAT THE 8 STATES MATTER.** B' adds parameters AND a
+recurrence AND the FiLM path relative to the baseline. This A/B measures the
+effect of that WHOLE package. It cannot separate "the 8 regulatory states carry
+information the model uses" from "the extra capacity / extra compute / the
+extra pathway helps". Any causal claim about the states requires a control that
+keeps the parameters and the recurrence but removes the INFORMATION, which this
+entry does not contain.
+
+**SCOPE CAVEAT.** 600 steps, depth 8, d_model 768, T=1024, 19.7M tokens, one
+RTX 5060 Ti. Not production scale. Per E13-fixed-3000 the `threat` drive is
+already pinned against the lower rail by ~step 1000-1350 at this scale, and
+this A/B never ran past step 600, so it says NOTHING about whether the state
+stays healthy at longer horizons.
+
+LIMITATIONS
+- Single machine. Runs are not bit-reproducible (GPU nondeterminism in the
+  backward pass), which is why the repeat exists.
+- Not cost-matched (see above).
+- The three seeds share one shard order and one dataset; no data variation.
+- Only three seeds. The per-seed spread of the paired diffs is
+  0.022354/0.012625/0.019093, a range of 0.0097, which is comparable to the
+  effect itself and would not survive many more seeds without tightening.
+
+FILES: `run_ab_v2.ps1`, `dry_test_wrapper.ps1` (both committed);
+`logs/ab_v2_<label>_s<seed>.txt` x7, `logs/ab_v2_results.json`,
+`logs/ab_v2_smoke_A.txt`, `logs/ab_v2_smoke_B.txt`,
+`logs/ab_v2_aborted_attempt1.txt`, `logs/ab_v2_crash_attempt2.txt`,
+`logs/dry/` (uncommitted, gitignored).
+
