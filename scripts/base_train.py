@@ -533,6 +533,23 @@ rda_sat_dims = []
 # run; it cannot mask saturation. Verified inert when unset.
 rda_force_sat = os.environ.get("RDA_FORCE_SAT", "")
 
+# The state.* group LR multiplier, applied per-step at the rescale below as
+# `group["lr"] = initial_lr * lrm * _rda_diag_lr_scale`.
+#
+# IT MUST BE INITIALISED HERE, OUTSIDE `if rda_active:`. The rescale that
+# consumes it runs on EVERY optimizer step of EVERY run, including the
+# baseline arm that never passes --rda, so a definition that only exists
+# inside the RDA block made the BASELINE ARM die with
+#   NameError: name '_rda_diag_lr_scale' is not defined
+# at the first optimizer step. Both halves arrived together in ab9b560: the
+# assignment was indented under `if rda_active:` while the use stayed
+# unconditional in the shared training loop.
+#
+# 1.0 is the documented default and is exactly the pre-ab9b560 behaviour
+# (`initial_lr * lrm`), so a baseline run's learning rates are UNCHANGED by
+# this fix. RDA_STATE_LR still overrides it inside the RDA block below.
+_rda_diag_lr_scale = 1.0
+
 if rda_active:
     from nanochat.rda import GPTWithRDA, document_start_mask, DRIVE_DIMS
     bos_token_id = tokenizer.get_bos_token_id()
@@ -677,7 +694,9 @@ if rda_active:
     # (`group["lr"] = initial_lr * lrm * _rda_diag_lr_scale`) rather than by
     # editing initial_lr, so it composes correctly with lrm and survives
     # every step. 1.0 (the default) is exactly the old behaviour.
-    _rda_diag_lr_scale = 1.0
+    # NOTE: the `= 1.0` default is initialised UNCONDITIONALLY above the
+    # `if rda_active:` block, because the rescale that consumes it also runs
+    # for the baseline arm. Only the override is RDA-specific.
     if os.environ.get("RDA_STATE_LR"):
         _rda_diag_lr_scale = float(os.environ["RDA_STATE_LR"])
         print0("DIAG: state.* group lr multiplier = %g" % _rda_diag_lr_scale)

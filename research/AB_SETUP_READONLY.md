@@ -76,19 +76,53 @@ and refuses to start on failure, so any NEW sweep is protected.
 
 ## Ambiguities I cannot resolve from the repo
 
-1. **Which checkpoint the A/B evaluates.** `base_train.py` saves `meta/optim` at the
-   final step; `base_eval.py` defaults to `--step=None` = "last". Whether the
-   A/B is defined on the final-600 checkpoint or on the best ("Minimum validation
-   bpb") checkpoint is not stated in any doc. These can differ.
-2. **Baseline wall time.** logs/a_s42.log, a_s43.log, a_s44.log are TRUNCATED
-   (690/691/692 lines, no `Total training time`, no `Minimum validation bpb`, no
-   per-step lines). The 1.301217 / 1.287544 / 1.295109 baseline numbers in E1
-   therefore come from a source not present in `logs/`. Cannot confirm from where.
-3. **B' tag naming.** The manifest uses `b-causal-s42`; the log uses `b-stab-s42`;
-   E14 calls the checkpoint `B'-s42`. Three names, unclear whether one run or two.
-4. **Whether a-s42 should be re-run.** `a-s42-post.json` exists in manifests/ but
-   its purpose is undocumented; it may be a re-run after the causality fixes, or
-   something else.
-5. **Eval batch size for the recorded BPB.** `--eval-every=50` path vs
-   `base_eval.py --device-batch-size` (default 32) are different code paths and
-   need not produce identical BPB. The A/B number's provenance is not pinned.
+**RESOLVED 2026-10-01 — items 2 and 3 below were misdiagnoses. Both are now
+known, and neither cause was the pipe.**
+
+1. ~~**Which checkpoint the A/B evaluates.**~~ STILL OPEN as a definition, but
+   `ab_v2` fixes it operationally: validation BPB at the FINAL step (600),
+   parsed from `Step 00600 | Validation bpb:` (`base_train.py:740`), NOT
+   `Minimum validation bpb` (line 1065, best checkpoint).
+2. ~~**Baseline wall time unrecoverable / logs truncated.**~~ **WRONG. The
+   baseline logs are NOT truncated and did NOT fail.** `a_s42.log`,
+   `a_s43.log`, `a_s44.log` each completed600 steps and end with
+   `Minimum validation bpb:` 1.301217 / 1.287544 / 1.295109, `Total training
+   time:` 9.98 / 9.94 / 9.93 m, and a saved `optim_000600_rank0.pt`. They ran at
+   commit `030a384`, which PREDATES `ab9b560` and therefore predates the
+   NameError described below. Baseline wall time is ~10 m, not ~34 m: the B'
+   arm's FiLM path is what makes it slow (b-stab-s42 = 33.85 m).
+   **They appeared empty because the files are MIXED-ENCODING** — a UTF-8
+   header written by `Set-Content -Encoding utf8`, then a UTF-16LE body
+   appended by `Tee-Object`. Reading them as UTF-8 yields the header and
+   nothing else. This is a THIRD defect, in `run_sweep.ps1`'s logging, not in
+   training. Correct read: `[System.Text.Encoding]::Unicode.GetString(bytes)`.
+3. ~~**"B' tag naming — three names for one run."~~ PARTLY WRONG.
+   `b_stab_s42.log` and the `B'-s42` checkpoint are the SAME run (commit
+   `6ae93ce`). `b_causal_s42.log` is a DIFFERENT, earlier attempt (commit
+   `030a384`, dirty tree) that never produced a BPB. So there are two runs, not
+   three names for one.
+4. **Whether a-s42 should be re-run.** `manifests/a-s42-post.json` exists,
+   written at commit `6ee7cf6` with a DIRTY tree that included
+   `M scripts/base_train.py`. Its purpose is still undocumented.
+5. **Eval batch size for the recorded BPB.** STILL OPEN. `--eval-every=50` uses
+   `--device-batch-size=4`, whereas `base_eval.py` defaults to
+   `--device-batch-size=32`. Two different code paths that need not agree. The
+   A/B number's provenance is still not pinned.
+
+## A LATENT BUG THAT MADE THE BASELINE ARM UNRUNNABLE (found 2026-10-01)
+
+`scripts/base_train.py` referenced `_rda_diag_lr_scale` at line 941 — inside the
+per-step LR rescale that runs for EVERY run — but defined it at line 680,
+nested inside `if rda_active:` (line 536). Any run WITHOUT `--rda` therefore
+died at the first optimizer step with
+`NameError: name '_rda_diag_lr_scale' is not defined`.
+
+Both halves came from ONE commit, `ab9b560` ("Stabilize the RDA state"), which
+added the `RDA_STATE_LR` diagnostic hook and indented its default under the RDA
+block while leaving the use unconditional.
+
+It is invisible to the arm that was being run: `b-stab-s42` passed `--rda`, so
+it executed fine. Every BASELINE run since `ab9b560` would have failed. The
+`a-s42/43/44` logs predate `ab9b560`, which is why they are intact. Fixed by
+initialising the value above the `if rda_active:` block; default stays 1.0, so
+`--rda` behaviour is unchanged.

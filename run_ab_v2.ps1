@@ -31,7 +31,14 @@ Set-Location $root
 $env:NANOCHAT_DATASET = "fineweb-edu"
 $env:PYTHONIOENCODING  = "utf-8"
 
-$RESULTS = "logs\ab_v2_results.json"
+# NOTE THE NAME. This must NOT be called $results: PowerShell variable names
+# are CASE-INSENSITIVE, so $results (the ordered dictionary built at line ~169)
+# would be the SAME variable and would overwrite this path. That is exactly
+# what happened in attempt 2: Set-Content then received the dictionary as its
+# -Path, and wrote the JSON to a file literally named
+# "System.Collections.Specialized.OrderedDictionary" in the repo root instead
+# of to logs/ab_v2_results.json.
+$RESULTS_PATH = "logs\ab_v2_results.json"
 $LOGDIR  = "logs"
 
 # Identical in both arms. Every value traces to run_sweep.ps1 $BASE_FLAGS
@@ -306,7 +313,11 @@ if (-not $results.halted) {
     Write-Output ("VERDICT: effect is REAL = {0}" -f $real)
 }
 
-$results | ConvertTo-Json -Depth 6 | Set-Content -Path $RESULTS -Encoding utf8
+# Convert to a string variable FIRST, then write with -LiteralPath. This keeps
+# the pipeline out of the write entirely, so no object's ToString() can ever be
+# bound as a destination path.
+$json = ConvertTo-Json -InputObject $results -Depth 6
+Set-Content -LiteralPath $RESULTS_PATH -Value $json -Encoding utf8
 Write-Output ""
-Write-Output "wrote $RESULTS"
+Write-Output ("wrote {0}" -f $RESULTS_PATH)
 Write-Output "=== SWEEP COMPLETE ==="
