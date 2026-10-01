@@ -2282,3 +2282,142 @@ FILES: `run_ab_v2.ps1`, `dry_test_wrapper.ps1` (both committed);
 `logs/ab_v2_aborted_attempt1.txt`, `logs/ab_v2_crash_attempt2.txt`,
 `logs/dry/` (uncommitted, gitignored).
 
+
+---
+
+## E18-ARM-C-DIAG — arm C is 2.5x slower than B'' per step; cause OPEN
+
+Diagnostic only. Two independent pairs of 60-step runs, identical flags to the
+real runs except `--num-iterations=60` and `--eval-every=50` kept (evals do not
+change training numerics). No model, gain, drive or training code was changed.
+
+### (a) Measured pace and GPU state
+
+| | B' s42 | C s42 |
+|---|---|---|
+| exit | 0 | 0 |
+| wall, pair 1 / pair 2 | 2.95 / 2.88 min | 5.92 / 5.97 min |
+| trainer `dt` (steps >=5, n=55) | 2.100 / 2.013 s/step | 5.162 / 5.181 s/step |
+| tok/sec step 0 | 18,844 | 19,336 |
+| tok/sec step 10 | 16,706 | 7,446 |
+| tok/sec step 30 | 16,853 | 6,718 |
+| tok/sec step 59 | 16,709 | 7,117 |
+| peak VRAM | 7,727 MiB | 7,744 MiB |
+| VRAM trajectory | 356 -> 3166 -> 7727 -> flat | 335 -> 3166 -> 7727 -> flat |
+| mean utilisation | 88.8% | 93.9% |
+| mean SM clock | 2,738 MHz | 2,835 MHz |
+| mean power | 105.1 W | 70.9 W |
+| max temperature | 66 C | 63 C |
+
+Reproduced in two pairs; the C/B' ratio is stable to within 3% across four runs
+(2.5x, 2.57x, 2.46x, 2.57x). Sampling via `diagnostics/diag_gpu_sample.ps1`
+at 15 s into `logs/diag2_<arm>_gpu.csv`.
+
+C is arm-specific, NOT environmental: B' at 2.0-2.1 s/step matches ab_v2's
+20.7-25.9 min for 600 steps. A machine-wide slowdown would show in both arms.
+
+### (b) RETRACTION of the "GPU memory pressure" explanation
+
+An earlier pace report attributed C's slowness to VRAM pressure (96% of 8 GB,
+repeated allocator flushes). **That explanation is withdrawn.** Memory is high
+but STATIC and effectively IDENTICAL across arms: both arms reach ~7.7 GB
+within the first ~30 s (allocator warm-up) and then hold flat to the last
+sample, with peaks differing by 17 MiB (7727 vs 7744) and a final wobble of
++/-17 MiB that is noise, not a trend. There is no growth and no asymmetry to
+explain a progressive 2.5x slowdown.
+
+Also ruled out by measurement: sysmem/shared-memory fallback. `Shared Usage`
+totalled 14.5 MiB, so the card did NOT spill to shared memory. Thermal
+throttling is excluded (63-66 C, near-max clocks). HAGS is not set, i.e.
+Windows default, and is not a lever here. Idle VRAM with nothing of ours
+running was 507 MiB, so there was no pre-existing contention: the ~7.7 GB is
+the model's own footprint.
+
+The earlier 9.06 s/step wall figure (and the ~6 h projection built on it) came
+from a log that was block-buffering and therefore reporting stale step counts.
+At the measured 5.18 s/step, 600 steps projects to ~52 min, inside the new
+90-minute cap.
+
+### (c) CORRECTION — gradient pruning in C is narrower than previously stated
+
+E17-Arm-C-setup and the earlier session notes recorded that in arm C "backward
+does not traverse the drive path" and that C's per-step cost sat near
+baseline's. **Both are wrong, and the second inference was drawn from the
+first.**
+
+What is actually true: replacing `film_state` with a constant removes the
+loss gradient to `event_proj`, `pe_proj` and `h_norm`, and autograd prunes
+those backward edges (verified: `p.grad is None`, not a zero tensor). That
+pruning does NOT remove the FORWARD work. `drive_seq`/`update_seq`
+(`rda.py:951`), `predict_seq` (`rda.py:954`) and the `dpe` computation still
+execute every micro-step, and forward-call counts are identical in C and B'
+(1 call/step each for `update_seq`, `predict_seq`, `event_proj`, `drive_seq`,
+`modulate`). In C that work builds a graph that is then discarded, so C pays
+for the forward and skips only part of the backward.
+
+### (e) OPEN — why is C 2.5x slower per step?
+
+Not identified. Candidates, neither confirmed:
+  - wasted forward work building a dead graph (per (c));
+  - host-side synchronisation.
+
+Signature is suggestive but not decisive: C shows HIGHER utilisation (93.9% vs
+88.8%), HIGHER clocks (2835 vs 2738 MHz) and LOWER power (70.9 vs 105.1 W),
+which reads as waiting rather than computing. High util + high clocks + low
+power + halved throughput. A targeted profile is needed to separate the two;
+no profiling was run, so neither is asserted.
+
+NOT BLOCKING the A/B: validation BPB at a fixed step count is unaffected by
+wall-clock pace, and the C/B' comparison is like-for-like at equal steps.
+
+### (f) The grad-free RDA modules are "untrained AND decayed", not "at init"
+
+In arm C, `event_proj`, `pe_proj` and `h_norm` receive NO gradient (autograd
+pruned) and are added to the grad-free list only so
+`MuonAdamW._compute_adamw` does not crash calling `grad.float()` on `None`
+(`optim.py:73`). They are NOT frozen. `grad_free` is read only by the zero-grad
+priming at `base_train.py:935-940`; `optim.py` never sees the key, and
+`adamw_step_fused` applies decoupled decay unconditionally
+(`optim.py:75`, `p32.mul_(1 - lr*wd)`) before examining the gradient.
+
+Measured over 3 steps at lr 3e-3, wd 0.01 (`diagnostics/probe_arm_c_decay.py`):
+all six tensors shrank by exactly `(1 - 3e-5)^3`, observed ratio 0.999910178
+vs predicted 0.999910003, matching to 1.8e-7. `h_norm.bias` did not move only
+because it is 0.0 to begin with.
+
+CORRECTION to an earlier claim in this session that these are "bit-identical
+to init": that was an artifact of `probe_arm_c.py` excluding them from its own
+optimizer with `weight_decay=0.0`, which is not the training configuration.
+An earlier comment in `base_train.py` asserting they are "neither updated nor
+decayed" was wrong and has been rewritten.
+
+### (d) CORRECTION — the step-60 BPB difference is not evidence either way
+
+Recorded correctly as measured: at 60 steps C 1.904722 vs B' 1.904281,
+difference 0.000441 (pair 2: 1.904637 vs 1.904288, difference 0.000349).
+
+An earlier note characterised that as "not what you would see if the states
+were contributing". **That characterisation is withdrawn.** C being worse than
+B' is the direction CONSISTENT with the states contributing; the size at 60
+steps is negligible and well inside run-to-run noise, so it is not evidence in
+either direction. The A/B verdict must come from the 600-step three-seed
+comparison, not from this 60-step diagnostic.
+
+### Driver changes made for this phase (not model/gain/drive code)
+
+- `run_ab_v3.ps1`: 90-minute per-run timeout (`c103606`). On expiry kills the
+  process TREE (`Stop-Process` plus `taskkill /T`, because the venv shim spawns
+  the real interpreter as a child and killing only the parent orphans it and
+  keeps the GPU held), appends `TIMEOUT after 90 min`, returns 124, and records
+  `halted.timed_out` in the results JSON before stopping the sequence.
+  Two bugs found by self-test rather than assumed away: `Wait-Process
+  -Timeout` raises when the PID is gone, which misreported an instantly-exited
+  process as a timeout (replaced with a `HasExited` polling loop); and
+  `Start-Process -PassThru` reports `ExitCode` as `$null` unless `$p.Handle` is
+  cached first (verified: `cmd /c exit 5` gave `[]` uncached, `[5]` cached).
+- `run_ab_v3.ps1`: `PYTHONUNBUFFERED=1` set on `$env` so it is inherited by the
+  child. Verified by A/B with a payload printing one line per second WITHOUT
+  flush: unset = 0 lines readable while running, set = live (1,2,3,4 lines at
+  t=+1..4 s). An earlier version of that probe used `flush=True` and so
+  reported a false pass in both arms; the probe had to be fixed before it could
+  discriminate.

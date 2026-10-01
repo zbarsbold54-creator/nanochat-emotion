@@ -27,6 +27,16 @@ $TIMEOUT_LABEL = "TIMEOUT after {0} min" -f [int]($TIMEOUT_SECONDS / 60)
 # cp1252 encode error printing a proportionality sign.
 $env:NANOCHAT_DATASET = "fineweb-edu"
 $env:PYTHONIOENCODING  = "utf-8"
+# Unbuffered stdout, inherited by the child through Start-Process. Without it
+# python block-buffers a redirected stream in ~8 KB chunks, so the log lags the
+# run by thousands of steps: during the aborted 600-step C run the file showed
+# "step 200" (really 200 MICRO-steps) while the trainer was at outer step 123,
+# and a 45 s poll saw zero new bytes. That made the measured pace wrong by 1.8x
+# and briefly pointed at a nonexistent stall. Step lines then appear as they
+# are printed, which is what makes progress and the 90-minute cap auditable.
+# Set on $env (inherited) rather than passed per-process so it applies to the
+# venv shim and the real interpreter alike.
+$env:PYTHONUNBUFFERED = "1"
 
 # NOTE THE NAME. Must not be $results -- PowerShell variable names are
 # case-insensitive, so that would collide with the ordered dictionary below and
