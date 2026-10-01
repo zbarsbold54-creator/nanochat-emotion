@@ -271,3 +271,19 @@ Status:
   UNTESTED AND OUT OF SCOPE. Listed to record the direction of travel, not
   to imply it is planned. See DECISIONS.md, Decision 6.
 ```
+
+---
+
+## Related Concepts
+
+- [[RDA and Persistent State]] — H1 and H2 are claims about this architecture
+- [[Prediction Error]] — H3, the project's primary internal signal
+- [[Prediction vs Actual State]] — H4, the unused `dpe` signal
+- [[FiLM Modulation]] — H5, whether this is a sufficient conditioning route
+- [[State Saturation]] — H6 and H7, both refuted as explanations
+- [[Control Arm]] — the experiment that would test H1
+- [[Online Learning]] — H8, the out-of-scope extension
+
+Note that H2's status vocabulary separates [[HYPOTHESES]] from
+[[EXPERIMENT_LOG]]: a hypothesis is a claim that could be wrong, a fact is
+something measured and recorded.

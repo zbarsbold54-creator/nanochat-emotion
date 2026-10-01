@@ -2421,3 +2421,27 @@ comparison, not from this 60-step diagnostic.
   t=+1..4 s). An earlier version of that probe used `flush=True` and so
   reported a false pass in both arms; the probe had to be fixed before it could
   discriminate.
+
+---
+
+## Concept Notes
+
+The entries above are chronological. For the mechanism each one investigates,
+see:
+
+- [[RDA and Persistent State]] — the architecture across all entries
+- [[Event Signal]] — E7, E8: saturation investigation and the output-normalisation fix
+- [[Prediction Error]] — E3, E14: the PE pathway and the leak fix
+- [[FiLM Modulation]] — E10: the C1–C6 ablation suite
+- [[State Saturation]] — E11, E13-fixed: stabilisation evidence
+- [[State Prediction]] — E9: the dependency graph that tracked `dpe`
+- [[Prediction vs Actual State]] — the `dpe` signal
+- [[Label Leakage]] — E2, E3, E14: the retractions
+- [[Ablation Study]] — E10, E15
+- [[Control Arm]] — E17, E18
+- [[BPB]] — the metric every entry reports
+- [[Weight Decay]] — E18: the decay measurement
+- [[Optimizer State]] — E6: the TREE provenance check
+
+Retracted entries (E2, E13-SUPERSEDED, E14) are documented in
+[[FAILED_EXPERIMENTS]].

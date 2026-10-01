@@ -298,3 +298,20 @@ What remains uncertain:
   Nothing. The heuristic is cheap and has no false-positive cost beyond
   the time spent re-checking.
 ```
+
+---
+
+## Related Concepts
+
+- [[FiLM Modulation]] — Decision 1 (per-position causal FiLM), Decision 3 (RMS budget)
+- [[Event Signal]] — Decision 2: normalise the projection output, not its input
+- [[Prediction vs Actual State]] — Decision 4: do not consume `dpe` yet
+- [[Residual Stream]] — Decision 2's underlying problem
+- [[State Saturation]] — the failure Decision 3 addresses
+- [[State Prediction]] — the module Decision 4 defers consuming
+- [[Label Leakage]] — the constraint Decision 1 exists to satisfy
+- [[Optimizer State]] — Decision 6: no sparse controllers before B' is tested
+
+The cross-cutting decision that diagnostics must observe, never replace, is what
+makes [[FAILED_EXPERIMENTS]] readable as evidence rather than as a list of
+mistakes.

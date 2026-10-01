@@ -318,3 +318,37 @@ close off a loss shortcut — the state pathway is still doing work.
 > rather than merely delayed**. The ablations support "controlled"; the
 > horizon does not yet rule out "delayed". The 1000-step run must come
 > first.
+
+---
+
+## Related Concepts
+
+The architecture described above is decomposed into concept notes, one per
+mechanism:
+
+- [[RDA and Persistent State]] — the system this file documents; the 8
+  dimensions and all three pathways
+- [[Event Signal]] — the hidden-state drive pathway
+- [[Prediction Error]] — the outcome drive pathway, and the leak surface
+- [[FiLM Modulation]] — the conditioning pathway, and the only state-to-loss route
+- [[Residual Stream]] — the tensor the event pathway reads and FiLM writes
+- [[State Saturation]] — why the recurrence is shaped as a convex combination
+- [[State Prediction]] — the predictor, and why its output is unused
+- [[Prediction vs Actual State]] — the `dpe` signal, distinct from prediction error
+- [[Online Learning]] — decay-only persistence across documents
+- [[Optimizer State]] — param groups, RDA enrolment, and the grad-free subtlety
+- [[Weight Decay]] — which acts even on grad-free parameters
+
+Measurement and experiment:
+
+- [[BPB]] — the metric every number here is read in
+- [[Ablation Study]] — the per-dimension and pathway ablations
+- [[Control Arm]] — the arm C comparison
+- [[Label Leakage]] — the bug that required the causal fixes above
+
+Learning material:
+
+- [[RDA_ARCHITECTURE_GUIDE]] — full walkthrough with diagrams
+- [[Python for ML]] — the Python needed to read this code
+- [[DECISIONS]] — the decisions behind each design choice
+- [[FAILED_EXPERIMENTS]] — what went wrong and why

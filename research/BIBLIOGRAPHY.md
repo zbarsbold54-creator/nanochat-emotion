@@ -162,3 +162,23 @@ a paper, and the error is invisible to everyone downstream.
 The slots above are deliberately explicit about what is being searched for
 and why, so that the next person can execute the searches rather than
 rediscover the need for them.
+
+---
+
+## Related Concepts
+
+The bibliography is currently empty of verified entries. The concepts below are
+the ones this project would need sources for, in rough order of priority:
+
+- [[RDA and Persistent State]] — the architecture under test
+- [[FiLM Modulation]] — the conditioning mechanism
+- [[Prediction Error]] — the drive input, and the PE literature
+- [[Online Learning]] — continual/adaptive architectures
+- [[Control Arm]] — experimental design references
+- [[Ablation Study]] — method references
+- [[BPB]] — standard language-modelling evaluation
+
+See [[HYPOTHESES]] for which claims are hypotheses rather than results, and
+[[BIBLIOGRAPHY]]'s own rules: no entry appears until its metadata is verified.
+An unverified citation is worse than a missing one, because it will be cited
+later by someone who trusts it.

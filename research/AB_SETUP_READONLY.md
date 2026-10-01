@@ -126,3 +126,16 @@ it executed fine. Every BASELINE run since `ab9b560` would have failed. The
 `a-s42/43/44` logs predate `ab9b560`, which is why they are intact. Fixed by
 initialising the value above the `if rda_active:` block; default stays 1.0, so
 `--rda` behaviour is unchanged.
+---
+
+## Related Concepts
+
+- [[BPB]] — the metric this setup verifies (final step, not best checkpoint)
+- [[Label Leakage]] — the fix commit `969e067` that both arms must contain
+- [[Control Arm]] — what the phase-2 B' arm is later compared against
+- [[RDA and Persistent State]] — the B' configuration being set up
+- [[Optimizer State]] — the latent bug that made the baseline arm unrunnable
+
+The latent bug recorded here is a `NameError` from a definition nested inside a
+conditional while its use was unconditional — invisible to any arm that took the
+conditional branch, fatal to every arm that did not.

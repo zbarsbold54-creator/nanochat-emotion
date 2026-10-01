@@ -114,3 +114,18 @@ A valid answer requires:
    saturate over the horizon actually used in training.
 5. Evidence that B′ differs from A in the hypothesized *direction*, not
    merely by a number that happens to be smaller.
+
+---
+
+## Related Concepts
+
+The primary question is about whether [[RDA and Persistent State]] carries
+information the base model does not already have.
+
+- [[Control Arm]] — the experiment designed to answer it, and its three
+  preconditions
+- [[Prediction Error]] — the signal that makes the state non-arbitrary
+- [[BPB]] — the metric the answer would be read in
+- [[Ablation Study]] — the related but weaker method
+- [[State Saturation]] — whether the state stays informative over the horizon
+- [[Anomaly Evaluation]] — a secondary question about unusual input

@@ -355,3 +355,23 @@ changed.** That pattern — implausible exact equality between a changed and
 an unchanged condition — is the most useful heuristic this project
 produced, and it is recorded here so it is applied deliberately rather
 than by luck.
+
+---
+
+## Related Concepts
+
+Each failure below maps to a mechanism now documented separately:
+
+- [[Label Leakage]] — F1, F2, F6; the most consequential failure
+- [[Event Signal]] — F5, the freeze-base probe that could not control
+- [[Prediction Error]] — the vector the leak travelled along
+- [[FiLM Modulation]] — F4, diagnostic shadowing; a shadowed method returned
+  unchanged results
+- [[BPB]] — the metric whose readings were most often misread
+- [[Weight Decay]] — F7's summary contradicted its own measurement
+- [[Ablation Study]] — why two counterfactuals were confounded
+
+The shared signature of F4 and F5 — *a result that came back exactly unchanged
+when something should have changed* — is the most useful heuristic this project
+produced. Implausible exact equality between a changed and an unchanged
+condition means the change did not take effect.

@@ -127,3 +127,17 @@ but the CHECKPOINT it was measured on carries that nondeterminism from training.
   batch. They are consistent with prior runs, but this is weaker than intended.
 - The near-cancellation between per-dimension and ALL-8 deltas is unexplained.
   It may mean the columns are strongly anti-correlated. NOT measured here.
+---
+
+## Related Concepts
+
+- [[Ablation Study]] — this run is the per-dimension instance of that method
+- [[FiLM Modulation]] — what is being ablated, dimension by dimension
+- [[RDA and Persistent State]] — the 8 dimensions whose contributions are measured
+- [[Prediction Error]] — the input that dominates the drive
+- [[State Saturation]] — the rail condition the per-dimension deltas probe
+- [[BPB]] — the metric and its signed-delta convention
+
+The two pre-run bugs recorded above are instances of the project's two most
+common error classes: a wrapper returning the original input (so every delta
+would be 0.0), and reading an unsigned `absmax` as if it were signed.

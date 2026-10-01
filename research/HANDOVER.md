@@ -31,3 +31,17 @@ Vision and 2D world simulation.
 
 ## Uncommitted
 `logs/**` (excluded). `base_train.py` unchanged.
+
+---
+
+## Related Concepts
+
+Start here if you are new:
+
+- [[RDA_ARCHITECTURE_GUIDE]] — the architecture, taught from first principles
+- [[Python for ML]] — the Python needed to read the code
+- [[RDA and Persistent State]] — the system as a whole
+- [[CURRENT_STATE]] — verified description of every pathway
+
+The retraction list above maps to [[FAILED_EXPERIMENTS]] and [[Label Leakage]].
+The open items map to [[RESEARCH_QUESTIONS]] and [[Control Arm]].

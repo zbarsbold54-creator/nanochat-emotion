@@ -22,3 +22,19 @@ run_sweep.ps1
 # Local setup
 CLAUDE.md
 wandb/
+
+# Obsidian (the research/ folder is edited as an Obsidian vault). The config
+# and workspace state are per-machine and per-user -- they record window
+# positions, pane layout and plugin choices, which are noise in a repo and
+# cause merge conflicts on every layout change.
+.obsidian/
+
+# Obsidian scratch artifacts. Created empty by Obsidian when a vault is opened,
+# so they carry no content worth versioning:
+#   Untitled.canvas          -- an empty canvas
+#   YYYY-MM-DD.md            -- an empty daily note for the day the vault opened
+# Real research notes in research/ are tracked normally; only these generated
+# placeholders are excluded. If a daily note ever contains real writing,
+# delete its line here and it will be tracked from then on.
+research/Untitled.canvas
+research/2026-10-01.md
