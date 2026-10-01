@@ -407,6 +407,19 @@ def install_hooks(m, a):
                                            for row in E_t.detach().abs().max(
                                                dim=1).values],
                     }
+                # Per-batch values for EVERY held-out batch, not just the
+                # first. The single-batch snapshot above is what the report
+                # quotes for threat/novelty, and one batch is not enough to
+                # check it against: the batches are different data.
+                _rec = ABL.setdefault("per_batch_state", [])
+                if len(_rec) < 64:
+                    _rec.append({
+                        "per_seq_mean": [[float(v) for v in row]
+                                         for row in E_t.detach().mean(dim=1)],
+                        "per_seq_absmax": [[float(v) for v in row]
+                                           for row in E_t.detach().abs().max(
+                                               dim=1).values],
+                    })
 
         # Environment snapshot taken INSIDE the forward call, so autocast or a
         # precision context set by the caller would be visible rather than
@@ -425,7 +438,13 @@ def install_hooks(m, a):
             "E_dtype": str(E_t.dtype),
             "W_dtype": str(st.film_scale.weight.dtype),
         }
-        return _orig_modulate(x, E_t, *a2, **kw2)
+        # PASS THE ABLATED TENSOR. `_E_use` is `E_t` unchanged unless an
+        # ablation is armed; when armed it is the modified clone. Returning
+        # `_orig_modulate(x, E_t, ...)` here instead would compute the
+        # ablation and then throw it away, making every delta exactly 0.0 and
+        # every dimension falsely reading as inert. When disarmed `_E_use is
+        # E_t`, so the training forward is bit-for-bit unchanged.
+        return _orig_modulate(x, _E_use, *a2, **kw2)
 
     st.modulate = _modulate_capturing
     st._probe_orig_modulate = _orig_modulate

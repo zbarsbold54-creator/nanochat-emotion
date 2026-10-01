@@ -2060,8 +2060,95 @@ FILES WRITTEN (all uncommitted; base_train.py verified unchanged throughout)
   logs/residual_report.txt                A/B/C + environment dump
   logs/tf32_test.txt                      independent synthetic confirmation
 
+## E15 — end-of-run per-dimension ablation — **SEE CORRECTION BELOW**
+
+Run 2026-10-01: seed 42, 3000 steps, `--abort-steps 10 --abort-bound 0.999`,
+8 held-out val batches (B=4, T=1024), weights frozen, `torch.no_grad()`, no
+optimizer step, carry state restored identically before every condition.
+Full write-up: `research/E15_ABLATION.md`. Outputs: `logs/abl_3000_ablation.json`.
+
+Two defects found before the numbers were trustworthy, both recorded in E15_ABLATION.md:
+
+1. **The ablation was computed and then discarded.** The committed
+   `--ablate`/`--ablate-out` code built the ablated tensor `_E_use` and then
+   returned `_orig_modulate(x, E_t, ...)` — the ORIGINAL `E_t`. Every delta
+   would have been exactly 0.0 and all eight dimensions would have falsely
+   read as inert. Fixed in the same commit as this entry; when disarmed
+   `_E_use is E_t` so the training forward is bit-for-bit unchanged.
+2. **`per_batch_state` was recorded but never serialized** (`_eval_condition`
+   returns only `ABL["state_used"]`). STILL UNFIXED as of this entry, so the
+   reported per-sequence means are from the FIRST held-out batch only.
+
+### CORRECTION to E15 — sign convention, super-additivity, and the noise floor
+
+> **The reading of the E15 table in the first commit of this entry was wrong in
+> three places. This block supersedes it. Nothing is deleted.**
+
+**1. SIGN CONVENTION — negative delta = the loss DECREASED when the channel was
+removed, i.e. removing the channel HELPED.**
+
+    zero-ablate threat      -0.0017176   <- loss DROPPED; channel was HARMFUL
+    zero-ablate novelty     -0.0007911   <- loss DROPPED; channel was HARMFUL
+
+    >>> WITHDRAWN: the E15 first-pass conclusion that "position variation is
+    >>> not used but the OFFSET IS USED" for threat and novelty. That reading
+    >>> assumed a positive delta meant the channel was doing useful work. For
+    >>> these two the deltas are NEGATIVE: zeroing threat made the loss
+    >>> BETTER by 0.0017, and zeroing novelty made it BETTER by 0.0008. On
+    >>> this checkpoint those channels are a net cost to the loss, not a
+    >>> benefit. Only `uncertainty` (+0.0176988) and `agency` (+0.0016174)
+    >>> have a clearly USEFUL offset.
+
+    Full signed zero-ablate table (baseline loss 4.247949):
+        uncertainty  +0.0176988  useful        arousal           -0.0004416
+        agency       +0.0016174  useful        homeostatic_dev   -0.0000830
+        integrity    -0.0000505                learning_progress -0.0000639
+        novelty      -0.0007911  HARMFUL       threat            -0.0017176 HARMFUL
+
+**2. SUPER-ADDITIVE, NOT 420x. The "420x" figure and its explanation are
+WITHDRAWN.**
+
+    sum of the 8 zero-ablate singles   +0.0161686
+    zero_ablate_ALL                    +0.0317354
+    ALL / largest single (uncertainty) = 1.793x
+    ALL / sum of the singles           1.963x
+
+    >>> WITHDRAWN: the E15 first-pass claim that zero_ablate_ALL is "420x the
+    >>> largest single dimension" and that the effects "nearly cancel" because
+    >>> "the columns are strongly anti-correlated". Both are wrong. 420x was an
+    >>> arithmetic error on my part. The measured relationship is
+    >>> SUPER-ADDITIVE: removing all eight at once costs ~1.8x the largest
+    >>> single effect and ~2.0x the sum of the singles. That is the opposite
+    >>> of cancellation. The pairwise interaction structure is NOT MEASURED;
+    >>> no claim about it is made here.
+
+**3. mean-ablate_ALL is +0.0004377, against a sum of the mean-ablate singles of
+about -0.0002. Position variation is almost entirely unused** — this stands.
+Per-dimension mean-ablate deltas span -2.3e-5 to +3.9e-5, i.e. 1e-7 to 1e-5
+relative on a loss of 4.25. Read as "indistinguishable from zero at this
+precision", NOT as "exactly zero".
+
+**4. THE NOISE FLOOR OF 0.0 IS NOT SAMPLING ERROR.** baseline and baseline_repeat
+are bit-identical because there is no backward pass in this evaluation, so the
+GPU nondeterminism documented in E13-fixed-3000 does not apply. The floor of 0.0
+reflects a DETERMINISTIC evaluation, and it bounds nothing about batch-to-batch
+variation. **The `within_noise` field in `logs/abl_3000_ablation.json` is
+MEANINGLESS and must not be read** — with a floor of 0.0 every nonzero delta is
+flagged "not within noise".
+
+**KNOWN GAPS, restated so they are not lost:**
+- `per_batch_state` not serialized; per-sequence means are from batch 1 only.
+- ONE seed, ONE checkpoint, 8 batches (32768 tokens), toy scale (depth 8,
+  d_model 768). No seed replication.
+- The interaction structure behind super-additivity is unmeasured.
+
 ## NOT YET RUN
 
 **E14 — 3-seed B' A/B comparison.** GATE MET by E13, but not launched.
 Awaiting explicit go-ahead. Do not launch seeds 43/44 without instruction.
+
+**From E15 (2026-10-01): no B' A/B has ever run on post-leak-fix code.** The
+withdrawn 1.226305 came from `b-stab-s42` at commit `6ae93ce`, which is the
+commit immediately BEFORE the fix `969e067`. Read-only detail in
+`research/AB_SETUP_READONLY.md`.
 
