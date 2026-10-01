@@ -54,6 +54,40 @@ function Build-Cmd([string]$arm, [int]$seed) {
     return @{ tag = $tag; argv = $cmd }
 }
 
+# Invoke one run via Start-Process.
+#
+# WHY NOT "& $py @argv 2>&1 | Out-File". base_train.py writes its INFO logging
+# to STDERR. Under "2>&1" PowerShell wraps each stderr line as an ErrorRecord
+# (NativeCommandError), and with $ErrorActionPreference = "Stop" the FIRST such
+# line becomes a terminating exception. Attempt 1 died ~6 s into run 1 on
+# "nanochat.common - INFO - Distributed world size: 1" with zero training done.
+# Start-Process redirects the two streams to real FILES, so nothing is ever
+# reinterpreted as an error record and ErrorActionPreference cannot fire.
+#
+# Argument quoting: Start-Process -ArgumentList takes an ARRAY and joins it,
+# but each element must already be a single token. Every element here is either
+# "-m"/"scripts.base_train" or a "--flag=value" with no space, so no element can
+# be split. The exe path is passed via -FilePath, NOT -ArgumentList, so the
+# space in "C:\AI\nanochat\...\python.exe" is handled by the OS, not by us.
+function Invoke-Run([string]$py, [string[]]$argv, [string]$log) {
+    $out = "$log.out"
+    $err = "$log.err"
+    $exe = (Resolve-Path $py).Path
+    # Single string, NOT an array: an array is re-quoted per element and can
+    # corrupt tokens. One joined string passes through verbatim.
+    $argLine = ($argv -join ' ')
+    # Write-Host, NOT Write-Output: Write-Output lands on the success stream,
+    # which the caller captures TOGETHER with the exit code, so the function
+    # would return an Object[] [EXEC line, exitcode] and every [int] use of
+    # the exit code would fail. Write-Host is not capturable, so this returns
+    # ONLY the integer.
+    Write-Host ("EXEC: {0} {1}" -f $exe, $argLine)
+    $p = Start-Process -FilePath $exe -ArgumentList $argLine `
+                       -NoNewWindow -Wait -PassThru `
+                       -RedirectStandardOutput $out -RedirectStandardError $err
+    return $p.ExitCode
+}
+
 # Parse "Step 00600 | Validation bpb: 1.234567" -> 1.234567.
 #
 # FORMAT VERIFIED against logs/baseline_train.log, which contains 13 real
@@ -72,7 +106,13 @@ function Get-FinalBpb([string]$path) {
     $m = [regex]::Matches($text,
           'Step 00600 \| Validation bpb:\s*([0-9]+\.[0-9]+|nan|inf|-inf|NaN|Inf)')
     if ($m.Count -eq 0) { return $null }
-    $raw = $m[$m.Count - 1].Groups[1].Value
+    # More than one match means the log merged two runs, or the step-600 eval
+    # printed twice. Either way the number is ambiguous, so refuse it.
+    if ($m.Count -gt 1) {
+        Write-Output ("ABORT: {0} step-00600 BPB line appears {1} times." -f $path, $m.Count)
+        return $null
+    }
+    $raw = $m[0].Groups[1].Value
     $v = 0.0
     if (-not [double]::TryParse($raw, [ref]$v)) { return [double]::NaN }
     return $v
@@ -130,7 +170,7 @@ $results = [ordered]@{
     label        = "ab_v2"
     written_utc  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     head         = $head
-    metric_line  = 'Step 06000 | Validation bpb: <x>   (scripts/base_train.py:740)'
+    metric_line  = 'Step 00600 | Validation bpb: <x>   (scripts/base_train.py:740)'
     metric_note  = "FINAL-step BPB, not 'Minimum validation bpb' (best checkpoint)"
     base_flags   = $BASE_FLAGS
     runs         = [ordered]@{}
@@ -145,6 +185,16 @@ foreach ($r in $order) {
     if ($repeat) { $tag = "$tag-repeat" }
 
     $log = Join-Path $LOGDIR ("ab_v2_{0}_s{1}.txt" -f $r.label, $r.seed)
+
+    # COLLISION GUARD. The script APPENDS, so reusing an existing log would
+    # silently merge two runs and make the BPB parse ambiguous. Halt instead.
+    if (Test-Path $log) {
+        Write-Output ("ABORT: log already exists, refusing to append: {0}" -f $log)
+        $results.halted = @{ label = $r.label; exit = -1; bpb = "n/a"
+                             nan = $false; reason = "log collision: $log"; log = $log }
+        break
+    }
+
     Write-Output ""
     Write-Output ("=== START {0} (arm {1} seed {2}) {3} ===" -f `
         $r.label, $r.arm, $r.seed, (Get-Date -Format "HH:mm:ss"))
@@ -164,12 +214,21 @@ foreach ($r in $order) {
     Set-Content -Path $log -Value $stamp -Encoding utf8
 
     $t0 = Get-Date
-    # NO Select-String filter on the live stream: that is what truncated the
-    # baseline logs in the previous sweep. Tee everything to the log, and grep
-    # the FILE afterwards if a filtered echo is wanted.
-    & $py @argv 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
-    $code = $LASTEXITCODE
+    $code = Invoke-Run $py $argv $log
     $wall = [math]::Round(((Get-Date) - $t0).TotalMinutes, 2)
+
+    # Fold both redirected streams into the single per-run log, each under a
+    # clear separator, so one file holds header + stdout + stderr in order.
+    Add-Content -Path $log -Value "" -Encoding utf8
+    Add-Content -Path $log -Value "===== STDOUT =====" -Encoding utf8
+    if (Test-Path "$log.out") { Get-Content "$log.out" -Encoding utf8 |
+        Add-Content -Path $log -Encoding utf8 }
+    Add-Content -Path $log -Value "===== STDERR =====" -Encoding utf8
+    if (Test-Path "$log.err") { Get-Content "$log.err" -Encoding utf8 |
+        Add-Content -Path $log -Encoding utf8 }
+    Add-Content -Path $log -Value "===== END (exit=$code) =====" -Encoding utf8
+    # The .out/.err files are intermediates; the .txt is the record.
+    Remove-Item "$log.out","$log.err" -ErrorAction SilentlyContinue
 
     $bpb = Get-FinalBpb $log
     $trainMin = Get-WallMinutes $log
