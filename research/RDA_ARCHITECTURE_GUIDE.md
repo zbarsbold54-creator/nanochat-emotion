@@ -1396,3 +1396,131 @@ mechanism. Read the guide for the reasoning, the note for the specific.
 - [[EXPERIMENT_LOG]] — chronological record
 - [[RESEARCH_QUESTIONS]] — the open questions
 - [[HYPOTHESES]] — claims separated from facts
+
+---
+
+## Learning Path
+
+A concrete route through this vault, ordered so each step assumes only the ones
+before it. Six stages. Skip or reorder stages 5-6 if you only want to
+understand the architecture; stages 1-4 are the minimum for working on the code.
+
+### Stage 1 — Python and tooling (2-3 hours)
+
+Nothing else is readable without this.
+
+1. [[Python for ML]] — **Tensors and shapes**, then **Classes and
+   inheritance**, then **The training loop idiom**. Read the whole file; it is
+   short.
+2. Back to the file for **Views versus copies**, **Type hints and casts**, and
+   **Assertions**. Those four cover the mistakes this codebase actually makes.
+3. **Numerical precision — the TF32 trap** and **Buffering and logging**. Read
+   the buffering section even if you never touch the drivers — it explains why
+   a log once showed step 200 when the trainer was at step 123.
+4. **PowerShell pitfalls on Windows**, last, and only if you will run anything.
+
+**Checkpoint.** You can read `forward()` in `rda.py` and predict what
+`hidden[:, :-1, :]` produces.
+
+### Stage 2 — The base architecture (3-4 hours)
+
+1. [[RDA_ARCHITECTURE_GUIDE]] §1, *The transformer as a residual stream*. Read
+   "The cost: the stream has no bounded scale" twice — it is the setup for
+   everything that failed later.
+2. Guide §2, *Attention, and what mixing means*. Only the subsection "One
+   crucial detail for a recurrent architecture" matters for RDA; the rest is
+   background.
+3. [[Residual Stream]] — the concept note version, shorter.
+4. Guide §4, *Feature-wise Modulation*, if you already know FiLM from elsewhere.
+   Otherwise read [[FiLM Modulation]] instead.
+
+**Checkpoint.** You can explain why the event pathway reads the *unmodulated*
+stream and why that ordering is load-bearing.
+
+### Stage 3 — The RDA mechanism (4-5 hours, the core)
+
+Read in this order; each note assumes the previous.
+
+1. [[RDA and Persistent State]] — the whole system, all three pathways. This is
+   the map.
+2. [[Event Signal]] — the hidden-state drive. Pay attention to "Layer 2" and the
+   freeze-base control; it is the best diagnostic story in the project.
+3. [[Prediction Error]] — the outcome drive. Two failure modes, both from
+   properties of NLL you can reason about directly.
+4. Guide §3, *The training loop's hidden state*, for the recurrence's failure
+   modes and the convex-combination fix.
+5. [[State Saturation]] — the `threat` investigation, and the section "The open
+   problem — bounded is not healthy".
+6. [[FiLM Modulation]] — the RMS budget and the three ablations that pinned the
+   self-excitation.
+7. Guide §6, *Reparameterization as a stability tool*, to see all three bounding
+   mechanisms together as one design philosophy.
+8. [[State Prediction]] and [[Prediction vs Actual State]] — the unused
+   predictor and the `dpe` signal. Read the second before the first if you tend
+   to confuse them.
+
+**Checkpoint.** You can predict the effect of a change to `decay` or to
+`event_drive_scale`, and say what evidence would falsify your prediction.
+
+### Stage 4 — Causality and the failure record (3-4 hours)
+
+This is the part that makes you useful on this project, because the codebase is
+now correct and the *reasoning* is where mistakes still get made.
+
+1. Guide §8, *Causality and the label-leak surface*, worked through in full.
+2. [[Label Leakage]] — the same content as a standalone note, with the two
+   invalid counterfactuals.
+3. Guide §7, *Closed-form recurrences* — the missing-`decay` bug is the best
+   example of a reference implementation earning its keep.
+4. [[FAILED_EXPERIMENTS]] — read F4 and F5 closely. Their shared signature,
+   *a result that came back exactly unchanged when something should have
+   changed*, is the most useful heuristic this project produced.
+5. Guide §15, *Retractions and corrections* — the 12-row table, grouped into
+   three error classes.
+
+**Checkpoint.** You can look at a `.norm()` or `.std()` call without a `dim`
+argument and know immediately that it is probably wrong.
+
+### Stage 5 — Measurement (3 hours)
+
+1. [[BPB]] — the metric, the noise floor, and why the 0.0137 threshold is a
+   proposal rather than a calibrated value.
+2. [[Ablation Study]] — C1-C6, the per-dimension run, and what an ablation
+   cannot tell you.
+3. [[Control Arm]] — arm C, its three verified preconditions, and the two
+   behaviours that are consequences of the intended one.
+4. Guide §9, *Experimental design*, if you want the general framing.
+
+**Checkpoint.** Given a proposed change, you can say which experiment
+distinguishes its effect from a capacity effect.
+
+### Stage 6 — Results and open questions (2 hours)
+
+1. Guide §14, *Measurement history* — the A/B, the saturation investigation, and
+   four methodological lessons that each cost a retraction.
+2. [[Control Arm]] §"Status: unresolved" and the 200-step preview.
+3. Guide §16, *Open questions* — and read [[State Saturation]] §"The open
+   problem" again, because it is the sharpest one.
+4. Guide §17, *Glossary*, as a reference rather than a read.
+
+**Checkpoint.** You can state the primary question, what would answer it, and
+why the current evidence does not.
+
+### Working path, once you are through
+
+| Goal | Go to |
+|---|---|
+| understand a mechanism | the concept note, then Guide §1-7 |
+| understand a result | [[EXPERIMENT_LOG]], then [[FAILED_EXPERIMENTS]] if retracted |
+| check what is true right now | [[CURRENT_STATE]], then [[HANDOVER]] |
+| change the architecture | [[DECISIONS]] first — six choices already settled, with evidence |
+| see what is still open | [[RESEARCH_QUESTIONS]] and [[HYPOTHESES]] |
+
+### The shortest useful path
+
+If you have 90 minutes: [[RDA and Persistent State]] → [[Event Signal]] →
+[[FiLM Modulation]] → [[Control Arm]] → [[Label Leakage]].
+
+That is the architecture, both drive pathways, the only path to the loss, the
+experiment that tests whether any of it matters, and the bug that invalidated
+most of the project's earlier results. Everything else is detail.
