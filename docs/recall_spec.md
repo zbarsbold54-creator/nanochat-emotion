@@ -26,3 +26,10 @@ Pre-registered additions (calibration, floor, manipulation check)
 - Capacity probe: D and D_const trained with the frozen settings; CROSS recall pooled over CROSS buckets and classes.
 - Manipulation check: on the trained D checkpoint, 2048 eval rows, the paired within-row difference (SALIENT minus ORDINARY) of the 8-dim state L2 norm at the event [K] position, standardized (paired Cohen's d). Pass if d >= 0.5 and the 95% bootstrap CI over rows excludes 0. Also report per-drive standardized differences.
 - Interpretation guard: CROSS recall at or below the null for an arm is reported as a CAPACITY NULL; a failed manipulation check makes any salience null uninterpretable.
+
+Generator amendment (2026-10-11)
+The previous generator assigned keys and values with seed-dependent affine maps of the row index. In each class, value was therefore a deterministic function of key and index modulo 16; the mapping also changed with the seed. A model could memorize the training stream's mapping by weight, so this task did not establish in-context recall.
+
+The corrected generator samples each row from an RNG seeded by (seed, index). It samples two distinct key symbols uniformly from the key pool and samples two value symbols uniformly and independently from the value pool, without using key, class, or index as a symbol mapping. Event slots assign those sampled symbols to the randomized SALIENT/ORDINARY classes. Eval-grid strata balance the value marginal separately by delay bucket and class through stratified assignment; that balancing must not encode a deterministic mapping from index, key, or class to value. Training and evaluation use identical pools and salts with disjoint (seed, index) streams. Training advances through every row index rather than selecting only even indices.
+
+The existing calibration gate and stop rule are unchanged: train A for 1200 iterations at answer weight 5; if either delay-16 class is below 0.80, retry once at weight 20; if either class remains below 0.80, stop and report without training D or D_const.
