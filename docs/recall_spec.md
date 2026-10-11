@@ -33,3 +33,16 @@ The previous generator assigned keys and values with seed-dependent affine maps 
 The corrected generator samples each row from an RNG seeded by (seed, index). It samples two distinct key symbols uniformly from the key pool and samples two value symbols uniformly and independently from the value pool, without using key, class, or index as a symbol mapping. Event slots assign those sampled symbols to the randomized SALIENT/ORDINARY classes. Eval-grid strata balance the value marginal separately by delay bucket and class through stratified assignment; that balancing must not encode a deterministic mapping from index, key, or class to value. Training and evaluation use identical pools and salts with disjoint (seed, index) streams. Training advances through every row index rather than selecting only even indices.
 
 The existing calibration gate and stop rule are unchanged: train A for 1200 iterations at answer weight 5; if either delay-16 class is below 0.80, retry once at weight 20; if either class remains below 0.80, stop and report without training D or D_const.
+
+No-context replication test (2026-10-11)
+The no-context stop rule fired on D_const on the seed-1,000,000,000 eval stream (2048 rows): delay 320 SALIENT accuracy 0.078125 vs permutation-null CI [0.019531, 0.070312]; delay 832 ORDINARY accuracy 0.082031 vs permutation-null CI [0.023438, 0.078125]. The manipulation check and the power analysis were not run as a result.
+
+Replication test (pre-registered before the rerun):
+- Fresh eval stream: seed base 2,000,000,000, indices 0 to N-1 with N = 16384 rows, giving 2048 rows per class/delay cell on the same stratified, value-balanced grid. The stream is disjoint from the training stream (seed 0) and from the seed-1,000,000,000 eval stream by seed construction; disjointness is verified before the run.
+- Models: D_const (recall-Dconst-s43-w20) and D (recall-D-s43-w20), same checkpoints, step 1200.
+- Per-cell rule unchanged: flag a cell if no-context accuracy exceeds its permutation-null 95% CI.
+- (a) Pooled test per model: no-context accuracy over all 16 cells with a permutation-null 95% CI, bootstrapped over rows and paired by row.
+- (b) Holm correction across all 16 no-context cells (8 delays x 2 classes) per model at alpha 0.05, reported next to the uncorrected flags. Per-cell p-value: one-sided paired bootstrap over the cell's rows, p = fraction of 5000 resamples of (no-context correct minus permutation-null match) with mean <= 0.
+- Decision rule: if no cell is significant under Holm AND the pooled test is within its null interval for both models, the original exceedance is judged a multiplicity artifact and the stop is lifted. Otherwise the stop stands and the leak path must be investigated before any further claims.
+
+For FUTURE runs only, the no-context control uses the pooled test plus Holm correction instead of the uncorrected per-cell rule.
