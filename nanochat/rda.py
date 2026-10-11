@@ -15,6 +15,8 @@ attention modulation driven by `dpe`, RL, MoE, architectural
 adaptation. `dpe` is computed and logged, never consumed.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -147,6 +149,30 @@ class RDAStateModule(nn.Module):
 
         # Initial state, learned, so training does not have to wait for the
         # recurrence to warm up from a fixed vector.
+        #
+        # GRADIENT STATUS -- read before assuming this is frozen or that it
+        # trains. Both intuitions are wrong, in different ways:
+        #
+        #   * It is NOT gradient-free by architecture. A path exists:
+        #       e_init -> init_state() -> E_t -> film_state -> modulate() -> loss
+        #     and init_state() is differentiable (unsqueeze/expand/contiguous ON
+        #     e_init, so the graph is retained).
+        #   * At step 0 that path yields EXACTLY 0.0, because film_scale and
+        #     film_shift are zero-initialised and modulate() is therefore the
+        #     exact identity.
+        #   * From step 1 onward the trainer always supplies a carry, and
+        #     forward() DETACHES it, so e_init is unreachable and autograd
+        #     PRUNES it: p.grad is None.
+        #
+        # Measured over a 5-step loop reproducing the trainer's call pattern:
+        #   per-step |grad| = ['0.000e+00', 'None', 'None', 'None', 'None']
+        #   after 5 steps   = [0,0,0,0,0,0,0,0]
+        #
+        # So: STRUCTURALLY LEARNABLE, but in practice frozen at its zero init in
+        # every real run. `base_train.py` therefore keeps it in the grad-free
+        # list, which is correct and harmless. If the persistence semantics ever
+        # change such that a fresh E_t_external could hold a meaningful state,
+        # this parameter becomes load-bearing and must be allowed to train.
         self.e_init = nn.Parameter(torch.zeros(n_drives))
 
         # RMS budget for each FiLM modulation vector, per position. See
@@ -154,6 +180,34 @@ class RDAStateModule(nn.Module):
         # than left free. Fixed and non-learnable, like event_drive_scale, so
         # it can never be traded off against the loss.
         self.film_rms = 0.5
+
+        # Measured 1/e horizon of the recurrence, in POSITIONS. This is the
+        # single number that says how long the state actually remembers, and it
+        # is exposed (rather than left implicit in `decay`) because it is the
+        # quantity that determines whether "persistent state" is a real claim.
+        #
+        # At the default decay=0.95 this is ~19.5 positions, so:
+        #   * within a 1024-token row, a perturbation of the incoming state is
+        #     below 50% of its initial size by t~13 and numerically zero by
+        #     t~500 (measured: 0.95^500 = 7.3e-12);
+        #   * across a document boundary inside a packed row (docs are ~256
+        #     tokens), the carried state arrives attenuated by 0.95^256 = 2.0e-6,
+        #     i.e. NOT carried across documents in any measurable sense.
+        #
+        # So the decay currently implements WITHIN-SEQUENCE INERTIA, and the
+        # "persistence across documents / micro-steps" reading of the design is
+        # NOT what this number provides. Both readings are legitimate designs;
+        # they need different decay values (0.95 -> ~20 positions,
+        # 0.999 -> ~1000). The value is a hyperparameter and is deliberately
+        # NOT changed here: see docs/decay_semantics.md. What matters is that
+        # anyone reading "persistent state" can now see which one is configured.
+        #
+        # Note the |E| <= 1 bound and the float64 closed form are UNAFFECTED by
+        # this value: the bound comes from the convex combination, and
+        # _max_safe_T GROWS as decay approaches 1 (13837 at 0.95, 709427 at
+        # 0.999). So a larger decay is numerically safe, if ever wanted.
+        self.decay_horizon = (float("inf") if self.decay <= 0.0
+                              else 1.0 / math.log(1.0 / self.decay))
 
     # -- recurrence ---------------------------------------------------------
     def init_state(self, batch_size: int, device, dtype=None) -> torch.Tensor:
@@ -1139,6 +1193,15 @@ class GPTWithRDA(nn.Module):
                 # TENSOR back from model(x, y, loss_reduction='none'), so return
                 # the raw (B, T) tensor rather than the dict, keeping this
                 # wrapper a drop-in for GPT in eval code.
+                #
+                # Record the post-forward state FIRST, before the early return.
+                # evaluate_bpb advances its evaluation carry from `last_state`,
+                # and it cannot do that if this attribute is only set on the
+                # generation path. Detached: this is a readout, not part of any
+                # graph, and nothing downstream should be able to backprop
+                # through an eval.
+                self.last_state = E_next_final.detach()
+                self.last_mode = mode
                 return F.cross_entropy(
                     lm_logits.view(-1, lm_logits.size(-1)),
                     targets.view(-1),

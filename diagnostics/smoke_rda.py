@@ -111,6 +111,18 @@ none_grad = [n for n, v in grad_report.items() if v is None]
 #   predictor.*  - dpe is logged but not consumed (out of scope)
 #   e_init       - the state only enters the loss through FiLM, and
 #                  init_state() expands a zero vector, so grad is None
+#
+# CORRECTION (measured). The old comment here said e_init is grad-free because
+# "init_state() expands a zero vector". That is not the mechanism, and it is
+# wrong for a non-zero e_init: the zero VALUE is not what breaks the graph.
+# The real reason grad is None here is that this probe drives the model the way
+# base_train does -- with a carried, DETACHED state -- so e_init is simply not
+# reachable from the loss. Measured, 5 steps, trainer call pattern:
+#     per-step |grad| = ['0.000e+00', 'None', 'None', 'None', 'None']
+# i.e. at step 0 (no carry, zero-init FiLM) the grad is a real zero TENSOR, and
+# from step 1 (carry supplied and detached) it is None. See base_train.py's
+# grad-free comment and docs/decay_semantics.md for the consequence if the
+# persistence semantics ever change.
 expected_free = {"state.e_init"} | {n for n in grad_report if n.startswith("predictor.")}
 # event_proj/pe_proj/h_norm legitimately get ZERO (not None) at step 0: FiLM
 # receives E_t == 0 there, so d(loss)/d(event_proj) == 0, and h_norm only feeds

@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 @torch.no_grad()
-def evaluate_bpb(model, batches, steps, token_bytes):
+def evaluate_bpb(model, batches, steps, token_bytes, rda_carry=None):
     """
     Instead of the naive 'mean loss', this function returns the bits per byte (bpb),
     which is a tokenization vocab size-independent metric, meaning you are still comparing
@@ -27,10 +27,43 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     # record the losses
     total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())
     total_bytes = torch.tensor(0, dtype=torch.int64, device=model.get_device())
+    # RDA STATE MODE. `rda_carry` selects which state regime the metric is
+    # measured in, and this is a deliberate scientific choice, not a default.
+    #
+    # None (the default) calls the model with no `E_t_external`, so
+    # `GPTWithRDA` seeds from `E_init` on EVERY batch and runs `mode='reset'`.
+    # That is correct for a base model and for any caller wanting each batch
+    # measured independently. For an RDA model it measures a state regime the
+    # optimizer never saw -- a train/eval mismatch, the same class of defect as
+    # the already-retracted "unseen state distribution" measurement
+    # (research/EXPERIMENT_LOG.md, "PE off via targets=None").
+    #
+    # A tensor evaluates in the SAME regime training uses (`mode='carry'`), with
+    # the carry advanced from each forward, mirroring decay-only persistence.
+    # It is rebound LOCALLY, so the caller's tensor is never mutated: an eval
+    # cannot corrupt a training carry, and two evals cannot contaminate
+    # each other. Only pass this for an RDA model; a base GPT does not accept
+    # E_t_external.
+    carry = rda_carry
     batch_iter = iter(batches)
     for _ in range(steps):
         x, y = next(batch_iter)
-        loss2d = model(x, y, loss_reduction='none') # (B, T)
+        if carry is None:
+            loss2d = model(x, y, loss_reduction='none') # (B, T)
+        else:
+            loss2d = model(x, y, loss_reduction='none', E_t_external=carry) # (B, T)
+            # GPTWithRDA records the post-forward state as `last_state`. If it is
+            # absent, fail loudly rather than silently reverting to mode='reset'
+            # and quietly changing what the metric measures.
+            nxt = getattr(model, "last_state", None)
+            if nxt is None:
+                raise RuntimeError(
+                    "evaluate_bpb(rda_carry=...): model.last_state is None after a "
+                    "forward, so the evaluation carry cannot be advanced. Refusing "
+                    "to fall back silently to mode='reset', which would measure a "
+                    "different state regime than the one requested."
+                )
+            carry = nxt.detach()
         loss2d = loss2d.view(-1) # flatten
         y = y.view(-1) # flatten
         if (y.int() < 0).any(): # mps does not currently have kernel for < 0 for int64, only int32

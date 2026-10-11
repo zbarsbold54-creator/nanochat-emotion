@@ -612,6 +612,20 @@ if rda_active:
     rda_model = rda_model.to(device)
     model = rda_model
     print0(f"RDA ENABLED | n_drives=8 | decay=0.95 | persistence=decay-only | debug_steps={args.rda_debug_steps}")
+    # STATE THE PERSISTENCE SEMANTICS EXPLICITLY. The 1/e horizon is the number
+    # that says how long the state actually remembers, and at decay=0.95 it is
+    # ~19.5 POSITIONS -- not 1024 tokens and not one document. So the decay
+    # implements within-sequence inertia; the "carries across documents" reading
+    # of decay-only persistence is NOT what this value provides (a doc boundary
+    # inside a packed row attenuates the carried state by 0.95^256 = 2e-6).
+    # Printing it here means no run record can be read as claiming a persistence
+    # the configuration does not provide. See research/CODE_REVIEW.md F3.
+    print0("  persistence: 1/e horizon = %.1f positions "
+           "(= %.1f%% of a %d-token row); carried state reaches t=100 of a row at %.1e"
+           % (rda_model.state.decay_horizon,
+              100.0 * rda_model.state.decay_horizon / args.max_seq_len,
+              args.max_seq_len,
+              0.95 ** 100))
     if args.rda_const_state:
         _cv = rda_model.const_state_vec
         print0("RDA CONTROL ARM C | FiLM input = LEARNED CONSTANT (no state information)")
@@ -750,17 +764,47 @@ if rda_active:
     # MuonAdamW._compute_adamw calls grad.float() unconditionally, so a param
     # with grad=None crashes the step. Two RDA params are genuinely
     # grad-free:
-    #   state.e_init        - only read via init_state(); with decay-only
-    #                         persistence it is used once at step 0, and
-    #                         modulate() is the identity when E_t == 0, so the
-    #                         loss has no gradient path to it.
     #   predictor.*         - dpe is computed and logged but NOT
     #                         consumed (out of scope by design), so nothing in
-    #                         the loss depends on the predictor.
+    #                         the loss depends on the predictor. Autograd PRUNES
+    #                         these: p.grad is None, not a zero tensor.
+    #   state.e_init        - see the long note below. Structurally learnable,
+    #                         but in practice frozen at its zero init.
     # They are still ENROLLED (so coverage holds and they update if that ever
     # changes) but carry weight_decay=0 and get a zero grad each backward, so
     # the step is a no-op on them until something in the loss actually
     # consumes them.
+    #
+    # -------------------------------------------------------------------------
+    # WHY state.e_init IS IN THIS LIST. The earlier comment here read "the loss
+    # has no gradient path to it", which is WRONG. The true mechanism is a
+    # COMBINATION of two facts, and only together do they hold at every step:
+    #
+    #   1. There IS a gradient path, but only when E_t_external is None:
+    #          e_init -> init_state() -> E_t -> film_state -> modulate() -> loss
+    #      init_state() is differentiable (unsqueeze/expand/contiguous ON
+    #      e_init, so the graph is retained). At step 0 that path is live but
+    #      yields EXACTLY 0.0, because film_scale/film_shift are zero-init and
+    #      modulate() is therefore the exact identity.
+    #   2. From step 1 onward the trainer ALWAYS supplies a carry
+    #      (E_t_external=rda_carry_state) and forward() DETACHES it. A detached
+    #      tensor carries no graph, so e_init is unreachable from the loss and
+    #      autograd PRUNES it: p.grad is None from step 1 onward.
+    #
+    # Measured over a 5-step loop reproducing the trainer's exact call pattern:
+    #     e_init per-step |grad| = ['0.000e+00', 'None', 'None', 'None', 'None']
+    #     e_init after 5 steps   = [0,0,0,0,0,0,0,0]   max|delta| = 0.0
+    #
+    # So the practical status is: STRUCTURALLY LEARNABLE, but frozen at its zero
+    # init in every real run. Zero-priming it is therefore harmless and this
+    # list entry is CORRECT. It is not "no gradient path" -- it is "the only
+    # step with a path has a zero gradient, and every later step has no path".
+    #
+    # CONSEQUENCE IF THIS EVER CHANGES. If `decay` were raised so a carried state
+    #actually mattered (see docs/decay_semantics.md), a run could be launched
+    # in which E_t_external=None holds a MEANINGFUL state, and e_init would then
+    # be the thing that seeds it and MUST be allowed to train. Any such change
+    # has to revisit this entry.
     _grad_free = {id(rda_model.state.e_init)} | {
         id(p) for p in rda_model.predictor.parameters()}
     # CONTROL ARM C ONLY. When the FiLM input is a learned constant, nothing in
@@ -812,9 +856,60 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+        # ------------------------------------------------------------------
+        # VALIDATION STATE MODE (RDA). Decided explicitly, not by accident.
+        #
+        # THE BUG THIS FIXES. `evaluate_bpb` calls
+        #     model(x, y, loss_reduction='none')
+        # with no `E_t_external`, so GPTWithRDA took the `E_t_external is None`
+        # branch, seeded from `E_init`, and reported `mode='reset'`. Training,
+        # meanwhile, always passes `E_t_external=rda_carry_state` and is always
+        # `mode='carry'`. So the headline "Validation bpb" was measuring a
+        # DIFFERENT state regime from the one being trained, and only for RDA
+        # arms -- the baseline arm is unaffected because it has no state.
+        #
+        # WHY THIS IS A CORRECTNESS PROBLEM, NOT A TUNING CHOICE. This project
+        # already retracted one measurement for exactly this defect: evaluating
+        # FiLM "in an unseen state distribution" was ruled an invalid
+        # counterfactual (see research/EXPERIMENT_LOG.md, "PE off via
+        # targets=None"). Evaluating the carried-state model from E_init on every
+        # batch is the same error: it reports the quality of a state regime the
+        # optimizer never saw. We must NOT pick a mode because it makes the
+        # number look better.
+        #
+        # THE POLICY, and why. "Match training" is the defensible default: the
+        # quantity reported is then the BPB of the object actually being
+        # trained. Concretely, a SEPARATE evaluation carry is used:
+        #
+        #   * It starts at E_init once per eval call, so every eval is
+        #     deterministic and independent of training-step timing.
+        #   * It is carried across the eval batches within one eval, matching
+        #     the decay-only persistence the trainer uses.
+        #   * It is NEVER the training carry. Sharing that object would make the
+        #     reported metric depend on how many training steps preceded the
+        #     eval, i.e. on the eval cadence -- a worse confound than the one
+        #     being removed.
+        #
+        # The trade-off is stated rather than hidden: because decay=0.95 gives a
+        # 1/e horizon of ~19.5 positions, the carried state is numerically
+        # irrelevant past ~130 positions of a 1024-token row. So this change
+        # moves the metric only slightly at T=1024 -- but it removes a silent
+        # train/eval mismatch, and it will matter at any longer context. See F3
+        # in research/CODE_REVIEW.md: the persistence itself is weak, which is a
+        # separate problem from measuring it consistently.
+        #
+        # `rda_eval_state` is local to this eval call on purpose (see above).
+        _rda_eval_state = None
+        if rda_active:
+            _rda_eval_state = rda_model.state.init_state(
+                args.device_batch_size, device, dtype=torch.float32)
         with disable_fp8(model):
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
-        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f}")
+            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes,
+                                   rda_carry=_rda_eval_state)
+        # Report the mode the metric was actually produced under, so a reader
+        # never has to infer it.
+        _eval_mode = "carry(rda)" if rda_active else "n/a(no-rda)"
+        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.6f} | state_mode={_eval_mode}")
         if val_bpb < min_val_bpb:
             min_val_bpb = val_bpb
         wandb_run.log({
@@ -822,6 +917,7 @@ while True:
             "total_training_flops": flops_so_far,
             "total_training_time": total_training_time,
             "val/bpb": val_bpb,
+            "val/rda_state_mode": _eval_mode,
         })
         model.train()
 

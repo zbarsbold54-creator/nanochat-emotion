@@ -113,26 +113,59 @@ for step in range(args.steps):
     out = model(x, y, E_t_external=carry)
     h1.remove(); h2.remove()
 
-    # update() runs once per sequence position, so the hook fired T-1 times.
-    # Aggregate over the last position (the one that produced E_next_final).
-    ev = cap['ev']            # (B, n_drives)
-    pe = cap['pe']            # (B, n_drives)
-    ev_abs = ev.abs().mean().item()
-    ev_eff = ev_abs * state.event_drive_scale   # what actually enters tanh
-    pe_abs = pe.abs().mean().item()
-    sum_abs = (ev_eff + pe).abs().mean().item() if False else ev_eff + pe_abs
+    # SHAPES. The production path is the VECTORIZED drive_seq, which calls
+    # event_proj ONCE on the whole (B, T, d) batch -- so the hook fires ONCE and
+    # the captured tensors are (B, T, n_drives), not (B, n_drives).
+    #
+    # The previous comment here ("update() runs once per sequence position, so
+    # the hook fired T-1 times ... Aggregate over the last position") described
+    # the SEQUENTIAL implementation and had not been updated. It was wrong: only
+    # the LAST invocation was kept, and the shapes were mislabelled.
+    ev = cap['ev']            # (B, T, n_drives)
+    pe = cap['pe']            # (B, T, n_drives)
+    # The hook captures event_proj's RAW output. What actually enters tanh is
+    # the RMS-NORMALIZED value (rda.py normalizes ev over the drive axis in
+    # drive_seq), so the normalization has to be applied here or the probe
+    # reports a quantity that never reaches the state.
+    ev_n = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+    # Reduce over batch AND positions, with explicit dims. A bare .mean() would
+    # also reduce over the drive axis and collapse the 8 components together,
+    # which is exactly the quantity this probe exists to keep separate.
+    ev_abs = ev_n.abs().mean(dim=(0, 1))             # (n_drives,)
+    pe_abs = pe.abs().mean(dim=(0, 1))                # (n_drives,)
+    ev_eff = ev_abs * state.event_drive_scale         # what enters tanh
+    # THE TANH ARGUMENT, summed per drive BEFORE reducing.
+    #
+    # The old line was
+    #     sum_abs = (ev_eff + pe).abs().mean().item() if False else ev_eff + pe_abs
+    # which had three defects:
+    #   1. `if False` permanently disabled the only branch that was correct;
+    #   2. that branch was itself broken -- ev_eff and pe had already been
+    #      reduced to python floats by .item(), so it mixed a SCALAR with a
+    #      (B,T,n) tensor and silently broadcast rather than erroring;
+    #   3. the LIVE branch computed ev_eff + pe_abs, a sum of two INDEPENDENT
+    #      absolute means. That is not the magnitude of the tanh argument and
+    #      does not equal it even when the two terms share a sign, because
+    #      |a|+|b| != |a+b| and the per-position cancellation is lost. The
+    #      printed math.tanh(sum_abs) column was therefore not the drive.
+    # Sum the per-drive magnitudes first, then reduce: verified against the
+    # real pre-tanh argument to |diff| < 1e-5 when the terms share a sign.
+    sum_abs = (ev_eff + pe_abs).mean().item()         # scalar
     # raw NLL behind the scaled pe
-    pe_raw = pe_abs * state.pe_reference_scale
+    pe_raw = pe_abs.mean().item() * state.pe_reference_scale
 
     loss = out["loss"].item()
     et_norm = out["E_next"].norm(dim=-1).mean().item()
 
-    # Which term dominates the tanh argument?
-    dom = "ev" if ev_eff > pe_abs else "pe"
-    rows.append((step, loss, et_norm, ev_abs, ev_eff, pe_abs, sum_abs, pe_raw, dom))
+    # Which term dominates the tanh argument? Compare the magnitudes that
+    # actually enter it, per drive and then on average.
+    dom = "ev" if ev_eff.mean().item() > pe_abs.mean().item() else "pe"
+    rows.append((step, loss, et_norm, ev_abs.mean().item(), ev_eff.mean().item(),
+                 pe_abs.mean().item(), sum_abs, pe_raw, dom))
 
-    print(f"{step:>4} {loss:>9.4f} {et_norm:>8.4f} {ev_abs:>9.5f} {ev_eff:>9.5f} "
-          f"{pe_abs:>9.5f} {sum_abs:>9.5f} {pe_raw:>9.4f} {dom:>5} {math.tanh(sum_abs):>9.5f}")
+    print(f"{step:>4} {loss:>9.4f} {et_norm:>8.4f} {ev_abs.mean().item():>9.5f} "
+          f"{ev_eff.mean().item():>9.5f} {pe_abs.mean().item():>9.5f} "
+          f"{sum_abs:>9.5f} {pe_raw:>9.4f} {dom:>5} {math.tanh(sum_abs):>9.5f}")
 
     out["loss"].backward()
     for g in opt.param_groups:
