@@ -38,3 +38,6 @@ Anomalies / run notes:
 - Seed 42 B' and C were already run and are reused from their prior DBS=2 logs; no training rerun was made for those two.
 - GPU pre-check was 1310 MiB, below 1500 MiB; no holder stop was triggered.
 - The historical A/B launcher used device batch 4 in its shared base flags; this comparison uses device batch 2 as specified for this controlled run.
+
+## Code under test (correction)
+The A/B was run from a working tree with uncommitted changes on top of 5566d90. Those changes (the RDA module, --rda / --rda-const-state / --rda-debug-steps flags in base_train.py, loss_eval.py changes) are committed in c19de86e313048bb1a6d9f638f5ab7bd436f9364. To reproduce, check out that commit.
