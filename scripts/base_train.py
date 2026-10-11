@@ -92,6 +92,19 @@ parser.add_argument("--seed", type=int, default=42,
 # Regulatory Drive Architecture / RDA (opt-in; off = original training path, unchanged)
 parser.add_argument("--rda", action="store_true",
                     help="wrap the model in GPTWithRDA and carry regulatory drive state across micro-steps within an episode")
+def parse_rda_decays(value):
+    try:
+        decays = [float(item) for item in value.split(",")]
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected 8 comma-separated decay values") from exc
+    if len(decays) != 8 or any(not 0.0 <= decay < 1.0 for decay in decays):
+        raise argparse.ArgumentTypeError(
+            "expected exactly 8 decay values, each in [0, 1)"
+        )
+    return decays
+
+parser.add_argument("--rda-decays", type=parse_rda_decays, default=None,
+                    help="optional comma-separated decay values, one per RDA drive")
 parser.add_argument("--rda-const-state", action="store_true",
                     help="CONTROL ARM C: keep every RDA module, parameter and the "
                          "recurrence exactly as in --rda, but hand FiLM a LEARNED "
@@ -581,7 +594,9 @@ if rda_active:
     # ---------------------------------------------------------------------
     if os.environ.get("RDA_NO_LEAK_CHECK", "") != "1":
         _leak_rc = subprocess.call(
-            [sys.executable, os.path.join(REPO, "diagnostics", "test_no_label_leak.py")],
+            [sys.executable, os.path.join(REPO, "diagnostics", "test_no_label_leak.py")]
+            + (["--rda-decays", ",".join(map(str, args.rda_decays))]
+               if args.rda_decays is not None else []),
             cwd=REPO,
         )
         if _leak_rc != 0:
@@ -608,10 +623,13 @@ if rda_active:
         sys.exit(1)
     rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps,
                            const_state=args.rda_const_state,
-                           const_state_seed=args.seed)
+                           const_state_seed=args.seed,
+                           decay=args.rda_decays if args.rda_decays is not None else 0.95)
     rda_model = rda_model.to(device)
     model = rda_model
-    print0(f"RDA ENABLED | n_drives=8 | decay=0.95 | persistence=decay-only | debug_steps={args.rda_debug_steps}")
+    _decay_label = (", ".join("%.8g" % v for v in args.rda_decays)
+                    if args.rda_decays is not None else "0.95")
+    print0(f"RDA ENABLED | n_drives=8 | decay={_decay_label} | persistence=decay-only | debug_steps={args.rda_debug_steps}")
     # STATE THE PERSISTENCE SEMANTICS EXPLICITLY. The 1/e horizon is the number
     # that says how long the state actually remembers, and at decay=0.95 it is
     # ~19.5 POSITIONS -- not 1024 tokens and not one document. So the decay
@@ -620,12 +638,17 @@ if rda_active:
     # inside a packed row attenuates the carried state by 0.95^256 = 2e-6).
     # Printing it here means no run record can be read as claiming a persistence
     # the configuration does not provide. See research/CODE_REVIEW.md F3.
-    print0("  persistence: 1/e horizon = %.1f positions "
-           "(= %.1f%% of a %d-token row); carried state reaches t=100 of a row at %.1e"
-           % (rda_model.state.decay_horizon,
-              100.0 * rda_model.state.decay_horizon / args.max_seq_len,
-              args.max_seq_len,
-              0.95 ** 100))
+    if args.rda_decays is None:
+        print0("  persistence: 1/e horizon = %.1f positions "
+               "(= %.1f%% of a %d-token row); carried state reaches t=100 of a row at %.1e"
+               % (rda_model.state.decay_horizon,
+                  100.0 * rda_model.state.decay_horizon / args.max_seq_len,
+                  args.max_seq_len,
+                  0.95 ** 100))
+    else:
+        print0("  per-drive 1/e horizons: %s positions"
+               % ", ".join("%.1f" % horizon
+                           for horizon in rda_model.state.decay_horizon))
     if args.rda_const_state:
         _cv = rda_model.const_state_vec
         print0("RDA CONTROL ARM C | FiLM input = LEARNED CONSTANT (no state information)")

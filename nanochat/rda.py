@@ -88,16 +88,36 @@ class RDAStateModule(nn.Module):
     update()'s docstring for the measurements that motivated this.
     """
 
-    def __init__(self, d_model: int, n_drives: int = N_DRIVES, decay: float = 0.95,
+    def __init__(self, d_model: int, n_drives: int = N_DRIVES, decay=0.95,
                  pe_reference_scale: float = 10.0):
         super().__init__()
-        assert 0.0 <= decay < 1.0, f"decay must be in [0, 1), got {decay}"
+        if isinstance(decay, (tuple, list)):
+            assert len(decay) == n_drives, (
+                f"decay must contain one value per drive ({n_drives}), got {len(decay)}"
+            )
+            decay_values = torch.tensor(decay, dtype=torch.float64)
+            assert torch.all((decay_values >= 0.0) & (decay_values < 1.0)), (
+                f"decay values must be in [0, 1), got {decay}"
+            )
+            self.register_buffer("decay", decay_values)
+            self.decay_safe_T = min(
+                self._max_safe_T(value, torch.float64) for value in decay
+            )
+            self.decay_horizon = tuple(
+                float("inf") if value <= 0.0
+                else 1.0 / math.log(1.0 / value)
+                for value in decay
+            )
+        else:
+            assert 0.0 <= decay < 1.0, f"decay must be in [0, 1), got {decay}"
+            self.decay = decay
+            self.decay_horizon = (float("inf") if decay <= 0.0
+                                  else 1.0 / math.log(1.0 / decay))
         assert pe_reference_scale > 0.0, (
             f"pe_reference_scale must be positive, got {pe_reference_scale}"
         )
         self.d_model = d_model
         self.n_drives = n_drives
-        self.decay = decay
         # NLL of a random token is about ln(vocab_size) ~ 10.4 at init. The
         # error is divided by this before entering pe_proj so the PE term is
         # O(1) and zero-centred rather than a large constant-positive bias.
@@ -206,8 +226,6 @@ class RDAStateModule(nn.Module):
         # this value: the bound comes from the convex combination, and
         # _max_safe_T GROWS as decay approaches 1 (13837 at 0.95, 709427 at
         # 0.999). So a larger decay is numerically safe, if ever wanted.
-        self.decay_horizon = (float("inf") if self.decay <= 0.0
-                              else 1.0 / math.log(1.0 / self.decay))
 
     # -- recurrence ---------------------------------------------------------
     def init_state(self, batch_size: int, device, dtype=None) -> torch.Tensor:
@@ -315,7 +333,11 @@ class RDAStateModule(nn.Module):
         # convex combination outside [-1, 1] and break the bound.
         E_prev = torch.clamp(E_prev, -1.0, 1.0)
 
-        E_next = self.decay * E_prev + (1.0 - self.decay) * drive
+        if isinstance(self.decay, torch.Tensor):
+            decay = self.decay.to(dtype=drive.dtype).view(1, -1)
+            E_next = decay * E_prev + (1.0 - decay) * drive
+        else:
+            E_next = self.decay * E_prev + (1.0 - self.decay) * drive
 
         # The bound is a mathematical property of the convex combination, so
         # assert it rather than observe it. Any violation means the recurrence
@@ -456,9 +478,14 @@ class RDAStateModule(nn.Module):
             f"drive must be (B, T, n_drives), got {tuple(drive.shape)}"
         )
         B, L, n = drive.shape
-        d = self.decay
         acc_dtype = torch.float64
-        limit = self._max_safe_T(d, acc_dtype)
+        per_drive = isinstance(self.decay, torch.Tensor)
+        if per_drive:
+            d = self.decay.to(device=drive.device, dtype=acc_dtype)
+            limit = self.decay_safe_T
+        else:
+            d = self.decay
+            limit = self._max_safe_T(d, acc_dtype)
         if L > limit:
             # Two ways out, both of which keep the closed form. The default
             # is to FAIL LOUDLY rather than silently change behaviour: a
@@ -475,14 +502,21 @@ class RDAStateModule(nn.Module):
                 )
             return self._update_seq_chunked(E_start, drive, limit)
         dev = drive.device
-        w = torch.pow(                       # w[t] = decay**t,  (L,)
-            torch.tensor(d, device=dev, dtype=acc_dtype),
-            torch.arange(L, device=dev, dtype=acc_dtype),
-        )
-        g = (1.0 - d) * drive.to(acc_dtype)            # (B, L, n)
-        wv = w.view(1, L, 1)                            # (1, L, 1)
+        powers = torch.arange(L, device=dev, dtype=acc_dtype)
+        if per_drive:
+            d = d.view(1, 1, n)
+            wv = torch.pow(d, powers.view(1, L, 1))
+            g = (1.0 - d) * drive.to(acc_dtype)
+            E0 = (d.view(1, 1, n) * E_start.to(acc_dtype).unsqueeze(1))
+        else:
+            w = torch.pow(
+                torch.tensor(d, device=dev, dtype=acc_dtype),
+                powers,
+            )
+            wv = w.view(1, L, 1)
+            g = (1.0 - d) * drive.to(acc_dtype)
+            E0 = (d * E_start).to(acc_dtype).unsqueeze(1)
         acc = torch.cumsum(g / wv, dim=1)               # (B, L, n)
-        E0 = (d * E_start).to(acc_dtype).unsqueeze(1)   # (B, 1, n)
         E = wv * (E0 + acc)
         E = E.to(drive.dtype)
         assert E.abs().max() <= 1.0 + 1e-6, (
@@ -708,7 +742,7 @@ class GPTWithRDA(nn.Module):
     `dpe` is NOT consumed for anything in this step.
     """
 
-    def __init__(self, base_model, n_drives: int = N_DRIVES, decay: float = 0.95,
+    def __init__(self, base_model, n_drives: int = N_DRIVES, decay=0.95,
                  debug_steps: int = 200, check_leakage: bool = True,
                  const_state: bool = False, const_state_seed: int = 0):
         super().__init__()
@@ -1263,4 +1297,3 @@ def _logits_from_hidden(base, hidden):
     logits = logits.float()
     softcap = 15
     return softcap * torch.tanh(logits / softcap)
-

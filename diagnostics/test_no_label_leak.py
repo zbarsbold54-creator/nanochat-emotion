@@ -45,6 +45,7 @@ Run:  python diagnostics/test_no_label_leak.py
 Exit: 0 = invariant holds, 1 = LEAK (or a vacuous test)
 """
 
+import argparse
 import os
 import sys
 
@@ -80,14 +81,15 @@ def say(s=""):
     print(s, flush=True)
 
 
-def build(device):
+def build(device, decay=None):
     torch.manual_seed(SEED)
     cfg = GPTConfig(sequence_len=SEQ, vocab_size=VOCAB, n_layer=N_LAYER,
                     n_head=N_HEAD, n_kv_head=N_HEAD, n_embd=D_MODEL,
                     window_pattern="L")
     base = GPT(cfg)
     base.init_weights()
-    m = GPTWithRDA(base, debug_steps=0).to(device)
+    m = GPTWithRDA(base, debug_steps=0,
+                   decay=decay if decay is not None else 0.95).to(device)
     # Break the zero-init identity. Without this the test proves nothing.
     with torch.no_grad():
         m.state.film_scale.weight.normal_(0.0, 0.5)
@@ -120,6 +122,19 @@ def head_logits(m, hidden_mod):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rda-decays", default=None,
+                        help="optional comma-separated decay values, one per drive")
+    args = parser.parse_args()
+    decay = None
+    if args.rda_decays is not None:
+        try:
+            decay = [float(value) for value in args.rda_decays.split(",")]
+        except ValueError as exc:
+            parser.error(f"invalid --rda-decays: {exc}")
+        if len(decay) != 8 or any(not 0.0 <= value < 1.0 for value in decay):
+            parser.error("--rda-decays must contain exactly 8 values in [0, 1)")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     say("=" * 70)
     say("RDA LABEL-LEAK REGRESSION TEST")
@@ -127,7 +142,7 @@ def main():
     say("device=%s  d_model=%d layers=%d T=%d B=%d vocab=%d"
         % (device, D_MODEL, N_LAYER, SEQ, BATCH, VOCAB))
 
-    m = build(device)
+    m = build(device, decay=decay)
     x, y = make_io(device)
 
     # ---- the test's own preconditions ---- #
