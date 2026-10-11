@@ -14,3 +14,8 @@ Claim rules (fixed in advance):
 If an arm is at or below chance on CROSS delays, report a CAPACITY NULL, not a salience null.
 Effect-size threshold and eval row counts: set by a power analysis (next prompt) and committed before any arm is evaluated.
 Seeds: train rows from seed stream 0 upward, eval rows from seed base 1,000,000,000, never overlapping. Rows are deterministic from (seed, index).
+
+Clarifications after segment-invariance validation
+(a) WITHIN delays (16, 48) are attention-reachable; untrained models can recall there via in-context induction (untrained A: 0.203 at delay 16, SALIENT). WITHIN buckets are a positive control after training, and the no-memory floor test applies only to CROSS delays.
+(b) Scoring uses argmax restricted to the 16 value ids (chance 0.0625), and full-vocabulary accuracy is reported as a secondary column.
+(c) The first floor-check rule was misapplied to WITHIN buckets and was corrected on 2026-10-11.
