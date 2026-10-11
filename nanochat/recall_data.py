@@ -18,20 +18,12 @@ BOS_ID = 32759
 DELAY_GRID = (16, 48, 192, 320, 448, 576, 704, 832)
 CROSS_DELAY_BUCKETS = (2, 3, 4, 5, 6, 7)
 TRANSITION_OFFSETS = (1, 13, 47, 173)
+KEY_SALT = 211
+VALUE_SALT = 419
 
 
 def _rng(seed, index, salt=0):
     return np.random.default_rng(np.random.SeedSequence([int(seed), int(index), salt]))
-
-
-def _affine_parameters(seed, salt):
-    rng = np.random.default_rng(np.random.SeedSequence([int(seed), salt]))
-    return int(rng.choice(np.arange(1, N_KEYS, 2))), int(rng.integers(N_KEYS))
-
-
-def _balanced_symbol(seed, index, class_offset, salt):
-    multiplier, offset = _affine_parameters(seed, salt)
-    return (multiplier * int(index) + offset + class_offset) % N_KEYS
 
 
 @lru_cache(maxsize=None)
@@ -104,6 +96,12 @@ def row(seed, index, *, delay_bucket=None, segment_len=SEGMENT_LEN, bos_id=BOS_I
     class_order = rng.permutation(2)
     class_by_slot = ["ORDINARY", "ORDINARY"]
     class_by_slot[int(class_order[0])] = "SALIENT"
+    key_symbols = _rng(seed, index, KEY_SALT).choice(
+        N_KEYS, size=2, replace=False
+    )
+    value_symbols = _rng(seed, index, VALUE_SALT).integers(
+        N_VALUES, size=2
+    )
 
     filler_offsets = np.asarray(TRANSITION_OFFSETS, dtype=np.int32)
     chain_choices = rng.integers(len(filler_offsets), size=SEQUENCE_LEN)
@@ -122,21 +120,8 @@ def row(seed, index, *, delay_bucket=None, segment_len=SEGMENT_LEN, bos_id=BOS_I
             tokens[start:start + 8] = (
                 FILLER_START + rng.integers(N_FILLER, size=8)
             )
-            class_offset = 0
-            symbol_salt = 211
-            value_offset = 0
-            value_salt = 419
-        else:
-            class_offset = 1
-            symbol_salt = 211
-            value_offset = 1
-            value_salt = 419
-        key_id = KEY_START + _balanced_symbol(
-            seed, index, class_offset, symbol_salt
-        )
-        value_id = VALUE_START + _balanced_symbol(
-            seed, index, value_offset, value_salt
-        )
+        key_id = KEY_START + int(key_symbols[slot])
+        value_id = VALUE_START + int(value_symbols[slot])
         tokens[event_key] = key_id
         tokens[event_key + 1] = value_id
         tokens[query_key - 1] = QUERY_ID
@@ -169,14 +154,45 @@ def row(seed, index, *, delay_bucket=None, segment_len=SEGMENT_LEN, bos_id=BOS_I
 
 def build_eval_grid(n_rows=2048, seed_base=1_000_000_000,
                     segment_len=SEGMENT_LEN, bos_id=BOS_ID):
-    """Build equal per-delay/per-class eval strata using non-overlapping seeds."""
-    if n_rows <= 0 or n_rows % len(DELAY_GRID):
-        raise ValueError(f"n_rows must be a positive multiple of {len(DELAY_GRID)}")
+    """Build delay/class-balanced eval rows with randomized value assignment."""
+    rows_per_bucket = n_rows // len(DELAY_GRID)
+    if (n_rows <= 0 or n_rows % len(DELAY_GRID)
+            or rows_per_bucket % N_VALUES):
+        raise ValueError(
+            "n_rows must give a multiple of 16 rows per delay bucket"
+        )
     rows = []
     for index in range(n_rows):
-        bucket = (index // (n_rows // len(DELAY_GRID))) % len(DELAY_GRID)
+        bucket = index // rows_per_bucket
         rows.append(row(seed_base, index, delay_bucket=bucket,
                         segment_len=segment_len, bos_id=bos_id))
+
+    for bucket in range(len(DELAY_GRID)):
+        first = bucket * rows_per_bucket
+        bucket_rows = rows[first:first + rows_per_bucket]
+        value_rng = _rng(seed_base, bucket, VALUE_SALT)
+        for class_name in ("SALIENT", "ORDINARY"):
+            events = [
+                (item, event)
+                for item in bucket_rows
+                for event in item[3]["events"]
+                if event["class"] == class_name
+            ]
+            values = np.tile(
+                np.arange(N_VALUES, dtype=np.int64),
+                len(events) // N_VALUES,
+            )
+            value_rng.shuffle(values)
+            for (item, event), value_symbol in zip(events, values):
+                value_id = VALUE_START + int(value_symbol)
+                event_key = event["event_key_position"]
+                query_key = event["query_position"]
+                item[0][event_key + 1] = value_id
+                item[1][event_key] = value_id
+                if query_key + 1 < item[0].numel():
+                    item[0][query_key + 1] = value_id
+                item[1][query_key] = value_id
+                event["value"] = value_id
     return rows
 
 

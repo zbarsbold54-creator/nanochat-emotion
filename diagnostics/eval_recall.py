@@ -13,6 +13,7 @@ import torch
 from diagnostics.recall_models import load_model, parse_decays
 from nanochat.recall_data import (
     DELAY_GRID,
+    FILLER_START,
     N_VALUES,
     VALUE_START,
     build_batch,
@@ -39,15 +40,28 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
     class_names = ("SALIENT", "ORDINARY")
     class_index = {name: index for index, name in enumerate(class_names)}
     correct = np.zeros((n_rows, 2), dtype=np.bool_)
+    no_context_correct = np.zeros((n_rows, 2), dtype=np.bool_)
     full_vocab_correct = np.zeros((n_rows, 2), dtype=np.bool_)
     buckets = np.zeros(n_rows, dtype=np.int64)
     predictions = np.zeros((n_rows, 2), dtype=np.int64)
+    no_context_predictions = np.zeros((n_rows, 2), dtype=np.int64)
     true_values = np.zeros((n_rows, 2), dtype=np.int64)
     row_value_equal = np.zeros(n_rows, dtype=np.bool_)
     for start in range(0, n_rows, batch_size):
         subset = rows[start:start + batch_size]
         inputs, targets, _, metadata = build_batch(subset, device=device)
         logits = model(inputs)
+        no_context_inputs = inputs.clone()
+        for row_offset, row_meta in enumerate(metadata):
+            for event in row_meta["events"]:
+                event_key = event["event_key_position"]
+                query_key = event["query_position"]
+                neutral_positions = (event_key, event_key + 1, query_key)
+                for position in neutral_positions:
+                    no_context_inputs[row_offset, position] = FILLER_START
+                if query_key + 1 < no_context_inputs.size(1):
+                    no_context_inputs[row_offset, query_key + 1] = FILLER_START
+        no_context_logits = model(no_context_inputs)
         for row_offset, row_meta in enumerate(metadata):
             row_index = start + row_offset
             row_events = row_meta["events"]
@@ -64,24 +78,40 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
                     VALUE_START:VALUE_START + N_VALUES,
                 ]
                 predicted = VALUE_START + int(value_logits.argmax().item())
+                no_context_value_logits = no_context_logits[
+                    row_offset, query_position,
+                    VALUE_START:VALUE_START + N_VALUES,
+                ]
+                no_context_predicted = VALUE_START + int(
+                    no_context_value_logits.argmax().item()
+                )
                 full_vocab_predicted = int(
                     logits[row_offset, query_position].argmax().item()
                 )
                 expected = int(targets[row_offset, query_position].item())
                 predictions[row_index, class_id] = predicted
+                no_context_predictions[row_index, class_id] = (
+                    no_context_predicted
+                )
                 true_values[row_index, class_id] = expected
                 correct[row_index, class_id] = predicted == expected
+                no_context_correct[row_index, class_id] = (
+                    no_context_predicted == expected
+                )
                 full_vocab_correct[row_index, class_id] = (
                     full_vocab_predicted == expected
                 )
                 buckets[row_index] = event["delay_bucket"]
         del logits
+        del no_context_logits
+        del no_context_inputs
     del model
     torch.cuda.empty_cache()
 
     rng = np.random.default_rng(seed)
     permutation_rng = np.random.default_rng(seed + 7919)
     permutation_matches = np.zeros((n_rows, 2), dtype=np.bool_)
+    no_context_permutation_matches = np.zeros((n_rows, 2), dtype=np.bool_)
     other_event_matches = np.zeros((n_rows, 2), dtype=np.bool_)
     for bucket_index in range(len(DELAY_GRID)):
         bucket_rows = np.flatnonzero(buckets == bucket_index)
@@ -90,6 +120,9 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
             paired_rows = permutation_rng.permutation(bucket_rows)
         permutation_matches[bucket_rows] = (
             predictions[bucket_rows] == true_values[paired_rows]
+        )
+        no_context_permutation_matches[bucket_rows] = (
+            no_context_predictions[bucket_rows] == true_values[paired_rows]
         )
         other_event_matches[bucket_rows, 0] = (
             predictions[bucket_rows, 0] == true_values[bucket_rows, 1]
@@ -111,6 +144,34 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
             interval = bootstrap_interval(values, rng)
             accuracy = float(values.mean())
             class_accuracy[class_name] = accuracy
+            no_context_values = no_context_correct[
+                bucket_mask, class_id
+            ].astype(np.float64)
+            no_context_interval = bootstrap_interval(no_context_values, rng)
+            no_context_accuracy = float(no_context_values.mean())
+            no_context_null_values = no_context_permutation_matches[
+                bucket_mask, class_id
+            ].astype(np.float64)
+            no_context_null_interval = bootstrap_interval(
+                no_context_null_values, rng
+            )
+            no_context_null = float(no_context_null_values.mean())
+            no_context_flag = (
+                "ABOVE_NULL_CI"
+                if no_context_accuracy > no_context_null_interval[1]
+                else "WITHIN_NULL_CI"
+            )
+            print(
+                f"NO_CONTEXT delay={delay} class={class_name} "
+                f"accuracy={no_context_accuracy:.6f} "
+                f"ci95=[{no_context_interval[0]:.6f},"
+                f"{no_context_interval[1]:.6f}] "
+                f"permutation_null={no_context_null:.6f} "
+                f"permutation_ci95=[{no_context_null_interval[0]:.6f},"
+                f"{no_context_null_interval[1]:.6f}] "
+                f"flag={no_context_flag}",
+                flush=True,
+            )
             permutation_values = permutation_matches[
                 bucket_mask, class_id
             ].astype(np.float64)
@@ -147,6 +208,12 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
         all_results[str(delay)] = {
             "SALIENT": class_accuracy["SALIENT"],
             "ORDINARY": class_accuracy["ORDINARY"],
+            "SALIENT_no_context": float(
+                no_context_correct[bucket_mask, 0].astype(np.float64).mean()
+            ),
+            "ORDINARY_no_context": float(
+                no_context_correct[bucket_mask, 1].astype(np.float64).mean()
+            ),
             "SALIENT_permutation_null": float(
                 permutation_matches[bucket_mask, 0].astype(np.float64).mean()
             ),

@@ -997,7 +997,12 @@ while True:
         model.train()
 
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
-    if last_step or (step > 0 and step != args.resume_from_step and args.save_every > 0 and step % args.save_every == 0):
+    save_recall_step_zero = (
+        step == 0 and args.synthetic_recall_frac > 0.0 and not resuming
+    )
+    if (last_step or save_recall_step_zero
+            or (step > 0 and step != args.resume_from_step
+                and args.save_every > 0 and step % args.save_every == 0)):
         # When the regulatory drive state is active, the module and predictor live on the
         # GPTWithRDA wrapper, NOT on orig_model, so orig_model.state_dict()
         # alone would silently drop them and reloading would yield a randomly
@@ -1040,8 +1045,14 @@ while True:
     # evaluate the gradient
     synchronize()
     t0 = time.time()
+    answer_loss_sums = None
+    answer_loss_counts = None
+    if args.synthetic_recall_frac > 0.0 and step % 50 == 0:
+        answer_loss_sums = torch.zeros(2, dtype=torch.float64, device=x.device)
+        answer_loss_counts = torch.zeros(2, dtype=torch.float64, device=x.device)
     for micro_step in range(grad_accum_steps):
         recall_answer_mask = None
+        recall_class_masks = None
         if args.synthetic_recall_frac > 0.0:
             from nanochat.recall_data import build_batch, row
             batch_size = x.size(0)
@@ -1053,12 +1064,32 @@ while True:
             synthetic_rows = []
             for row_idx in range(recall_rows):
                 row_index = (
-                    (batch_id * batch_size + row_idx) * ddp_world_size + ddp_rank
+                    (batch_id * recall_rows + row_idx) * ddp_world_size
+                    + ddp_rank
                 )
                 synthetic_rows.append(row(0, row_index))
-            recall_x, recall_y, recall_answer_mask, _ = build_batch(
+            recall_x, recall_y, recall_answer_mask, recall_metadata = build_batch(
                 synthetic_rows, device=x.device
             )
+            recall_class_masks = torch.zeros(
+                (recall_rows, recall_answer_mask.size(1), 2),
+                dtype=torch.bool,
+                device=x.device,
+            )
+            for row_idx, row_meta in enumerate(recall_metadata):
+                for event in row_meta["events"]:
+                    class_idx = 0 if event["class"] == "SALIENT" else 1
+                    recall_class_masks[
+                        row_idx, event["query_position"], class_idx
+                    ] = True
+            recall_class_masks = torch.cat([
+                recall_class_masks,
+                torch.zeros(
+                    (batch_size - recall_rows, y.size(1), 2),
+                    dtype=torch.bool,
+                    device=y.device,
+                ),
+            ], dim=0)
             x = torch.cat([recall_x, x[recall_rows:]], dim=0)
             y = torch.cat([recall_y, y[recall_rows:]], dim=0)
             recall_answer_mask = torch.cat([
@@ -1092,6 +1123,16 @@ while True:
                 loss = (per_token_loss * loss_weights).sum() / (
                     loss_weights.sum() + torch.finfo(loss_weights.dtype).eps
                 )
+                if answer_loss_sums is not None:
+                    detached_loss = per_token_loss.detach()
+                    for class_idx in range(2):
+                        class_mask = recall_class_masks[
+                            :, :, class_idx
+                        ].reshape(per_token_loss.shape)
+                        answer_loss_sums[class_idx] += detached_loss[
+                            class_mask
+                        ].double().sum()
+                        answer_loss_counts[class_idx] += class_mask.sum()
                 rda_carry_state = model.last_state.detach()
                 _rda_mode = model.last_mode
                 rda_carry_counts[_rda_mode] = rda_carry_counts.get(_rda_mode, 0) + 1
@@ -1113,6 +1154,16 @@ while True:
                 loss = (per_token_loss * loss_weights).sum() / (
                     loss_weights.sum() + torch.finfo(loss_weights.dtype).eps
                 )
+                if answer_loss_sums is not None:
+                    detached_loss = per_token_loss.detach()
+                    for class_idx in range(2):
+                        class_mask = recall_class_masks[
+                            :, :, class_idx
+                        ].reshape(per_token_loss.shape)
+                        answer_loss_sums[class_idx] += detached_loss[
+                            class_mask
+                        ].double().sum()
+                        answer_loss_counts[class_idx] += class_mask.sum()
             else:
                 loss = model(x, y)
         train_loss = loss.detach() # for logging
@@ -1135,6 +1186,18 @@ while True:
                         if _p.grad is None:
                             _p.grad = torch.zeros_like(_p)
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
+    if answer_loss_sums is not None:
+        if is_ddp_initialized():
+            dist.all_reduce(answer_loss_sums, op=dist.ReduceOp.SUM)
+            dist.all_reduce(answer_loss_counts, op=dist.ReduceOp.SUM)
+        answer_means = answer_loss_sums / answer_loss_counts.clamp_min(1)
+        print0(
+            f"ANSWER_LOSS step={step} "
+            f"SALIENT={answer_means[0].item():.6f} "
+            f"ORDINARY={answer_means[1].item():.6f} "
+            f"ln16={math.log(16):.6f}",
+            flush=True,
+        )
     # FiLM trace. This MUST sit outside the micro-step loop: `step` is constant
     # across all grad_accum_steps micro-steps, so logging inside recorded the
     # same pre-optimizer-step weights once per micro-step (8 duplicate entries
