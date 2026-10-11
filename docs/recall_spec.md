@@ -19,3 +19,10 @@ Clarifications after segment-invariance validation
 (a) WITHIN delays (16, 48) are attention-reachable; untrained models can recall there via in-context induction (untrained A: 0.203 at delay 16, SALIENT). WITHIN buckets are a positive control after training, and the no-memory floor test applies only to CROSS delays.
 (b) Scoring uses argmax restricted to the 16 value ids (chance 0.0625), and full-vocabulary accuracy is reported as a secondary column.
 (c) The first floor-check rule was misapplied to WITHIN buckets and was corrected on 2026-10-11.
+
+Pre-registered additions (calibration, floor, manipulation check)
+- Floor: claim rule (ii) uses the permutation null from Part 1c, pooled over CROSS buckets, instead of the nominal 1/16. The arm must exceed it: bootstrap 95% CI lower bound above the null's upper bound.
+- Calibration: train A on the task for 1200 iterations with answer weight 5; if A's WITHIN delay-16 accuracy is below 0.80 for either class, retrain with answer weight 20; if still below, stop and report. The first setting that passes is frozen for all arms.
+- Capacity probe: D and D_const trained with the frozen settings; CROSS recall pooled over CROSS buckets and classes.
+- Manipulation check: on the trained D checkpoint, 2048 eval rows, the paired within-row difference (SALIENT minus ORDINARY) of the 8-dim state L2 norm at the event [K] position, standardized (paired Cohen's d). Pass if d >= 0.5 and the 95% bootstrap CI over rows excludes 0. Also report per-drive standardized differences.
+- Interpretation guard: CROSS recall at or below the null for an arm is reported as a CAPACITY NULL; a failed manipulation check makes any salience null uninterpretable.
