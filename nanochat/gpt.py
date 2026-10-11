@@ -37,6 +37,7 @@ class GPTConfig:
     # Characters: L=long (full context), S=short (quarter context)
     # Examples: "L"=all full context, "SL"=alternating, "SSL"=two short then one long
     window_pattern: str = "SSSL"
+    segment_len: int = 0
 
 
 def norm(x):
@@ -71,6 +72,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
+        self.segment_len = config.segment_len
         self.head_dim = self.n_embd // self.n_head
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
@@ -107,8 +109,22 @@ class CausalSelfAttention(nn.Module):
         # window_size is (left, right) tuple: (N, 0) for causal, (-1, 0) for full context
         if kv_cache is None:
             # Training: causal attention with optional sliding window
-            y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+            if self.segment_len:
+                y = torch.cat([
+                    flash_attn.flash_attn_func(
+                        q[:, start:start + self.segment_len],
+                        k[:, start:start + self.segment_len],
+                        v[:, start:start + self.segment_len],
+                        causal=True,
+                        window_size=window_size,
+                    )
+                    for start in range(0, T, self.segment_len)
+                ], dim=1)
+            else:
+                y = flash_attn.flash_attn_func(q, k, v, causal=True, window_size=window_size)
         else:
+            if self.segment_len:
+                raise ValueError("segment-len attention does not support KV-cache inference")
             # Inference: use flash_attn_with_kvcache which handles cache management
             k_cache, v_cache = kv_cache.get_layer_cache(self.layer_idx)
             y = flash_attn.flash_attn_with_kvcache(
@@ -485,6 +501,11 @@ class GPT(nn.Module):
             # Training / naive generate: full sequence available, use fast slice
             assert T > 1, "Training forward pass should have T > 1"
             gate = self.smear_lambda.to(x.dtype) * torch.sigmoid(self.smear_gate(x[:, 1:, :24]))
+            if self.config.segment_len:
+                segment_starts = torch.arange(
+                    1, T, device=x.device
+                ).remainder(self.config.segment_len) == 0
+                gate = gate.masked_fill(segment_starts[None, :, None], 0)
             x = torch.cat([x[:, :1], x[:, 1:] + gate * x[:, :-1]], dim=1)
         else:
             # KV cache inference: read prev embedding from cache, store current for next step

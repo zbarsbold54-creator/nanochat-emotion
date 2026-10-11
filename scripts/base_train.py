@@ -57,6 +57,12 @@ parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = de
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
 parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--segment-len", type=int, default=0,
+                    help="restrict attention to causal segments of this length (0 = off)")
+parser.add_argument("--synthetic-recall-frac", type=float, default=0.0,
+                    help="fraction of batch rows sourced from the synthetic recall generator (0 = off)")
+parser.add_argument("--recall-answer-weight", type=float, default=1.0,
+                    help="loss multiplier for synthetic recall answer positions (1 = off)")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
@@ -128,6 +134,14 @@ parser.add_argument("--primal-debug-steps", dest="rda_debug_steps", type=int,
 parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
                     default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 args = parser.parse_args()
+if args.segment_len < 0:
+    parser.error("--segment-len must be 0 or a positive integer")
+if not 0.0 <= args.synthetic_recall_frac <= 1.0:
+    parser.error("--synthetic-recall-frac must be in [0, 1]")
+if not math.isfinite(args.recall_answer_weight) or args.recall_answer_weight < 0.0:
+    parser.error("--recall-answer-weight must be finite and nonnegative")
+if args.synthetic_recall_frac > 0.0 and args.max_seq_len != 1024:
+    parser.error("--synthetic-recall-frac requires --max-seq-len 1024")
 _deprecated = [f for f in ("--primal-state", "--primal-debug-steps",
                             "--primal-drive-wd") if f in sys.argv]
 if _deprecated:
@@ -230,7 +244,7 @@ def build_model_meta(depth):
     config = GPTConfig(
         sequence_len=args.max_seq_len, vocab_size=vocab_size,
         n_layer=depth, n_head=num_heads, n_kv_head=num_heads, n_embd=model_dim,
-        window_pattern=args.window_pattern,
+        window_pattern=args.window_pattern, segment_len=args.segment_len,
     )
     with torch.device("meta"):
         model_meta = GPT(config)
@@ -1027,6 +1041,34 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
+        recall_answer_mask = None
+        if args.synthetic_recall_frac > 0.0:
+            from nanochat.recall_data import build_batch, row
+            batch_size = x.size(0)
+            recall_rows = min(
+                batch_size,
+                max(1, int(round(batch_size * args.synthetic_recall_frac))),
+            )
+            batch_id = step * grad_accum_steps + micro_step
+            synthetic_rows = []
+            for row_idx in range(recall_rows):
+                row_index = (
+                    (batch_id * batch_size + row_idx) * ddp_world_size + ddp_rank
+                )
+                synthetic_rows.append(row(0, row_index))
+            recall_x, recall_y, recall_answer_mask, _ = build_batch(
+                synthetic_rows, device=x.device
+            )
+            x = torch.cat([recall_x, x[recall_rows:]], dim=0)
+            y = torch.cat([recall_y, y[recall_rows:]], dim=0)
+            recall_answer_mask = torch.cat([
+                recall_answer_mask,
+                torch.zeros(
+                    (batch_size - recall_rows, y.size(1)),
+                    dtype=torch.bool,
+                    device=y.device,
+                ),
+            ], dim=0)
         if rda_active:
             # DECAY-ONLY PERSISTENCE. The state is never hard-reset at a
             # document boundary: `rda_carry_state` stays None only until the
@@ -1037,13 +1079,42 @@ while True:
             # are counted and logged so a carry that crossed a boundary is
             # distinguishable from one that stayed within a document.
             doc_starts = document_start_mask(x, bos_token_id)
-            out = model(x, y, E_t_external=rda_carry_state, doc_starts=doc_starts)
-            loss = out["loss"]
-            rda_carry_state = out["E_next"].detach()
-            rda_carry_counts[out["mode"]] = rda_carry_counts.get(out["mode"], 0) + 1
-            rda_doc_start_counts.append(out["n_doc_starts"])
+            if recall_answer_mask is not None and args.recall_answer_weight != 1.0:
+                per_token_loss = model(
+                    x, y, loss_reduction="none",
+                    E_t_external=rda_carry_state, doc_starts=doc_starts,
+                )
+                loss_weights = torch.where(
+                    recall_answer_mask.reshape(per_token_loss.shape),
+                    args.recall_answer_weight,
+                    1.0,
+                )
+                loss = (per_token_loss * loss_weights).sum() / (
+                    loss_weights.sum() + torch.finfo(loss_weights.dtype).eps
+                )
+                rda_carry_state = model.last_state.detach()
+                _rda_mode = model.last_mode
+                rda_carry_counts[_rda_mode] = rda_carry_counts.get(_rda_mode, 0) + 1
+                rda_doc_start_counts.append(int(doc_starts.sum().item()))
+            else:
+                out = model(x, y, E_t_external=rda_carry_state, doc_starts=doc_starts)
+                loss = out["loss"]
+                rda_carry_state = out["E_next"].detach()
+                rda_carry_counts[out["mode"]] = rda_carry_counts.get(out["mode"], 0) + 1
+                rda_doc_start_counts.append(out["n_doc_starts"])
         else:
-            loss = model(x, y)
+            if recall_answer_mask is not None and args.recall_answer_weight != 1.0:
+                per_token_loss = model(x, y, loss_reduction="none")
+                loss_weights = torch.where(
+                    recall_answer_mask.reshape(per_token_loss.shape),
+                    args.recall_answer_weight,
+                    1.0,
+                )
+                loss = (per_token_loss * loss_weights).sum() / (
+                    loss_weights.sum() + torch.finfo(loss_weights.dtype).eps
+                )
+            else:
+                loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
