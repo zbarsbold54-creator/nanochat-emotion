@@ -28,15 +28,38 @@ def bootstrap_interval(values, rng, repetitions=5000):
     return tuple(float(value) for value in np.quantile(samples, [0.025, 0.975]))
 
 
+def paired_bootstrap_pvalue(differences, rng, repetitions=5000):
+    """One-sided paired-bootstrap p-value: P(resample mean <= 0)."""
+    differences = np.asarray(differences, dtype=np.float64)
+    indices = rng.integers(
+        0, len(differences), size=(repetitions, len(differences))
+    )
+    samples = differences[indices].mean(axis=1)
+    return float((samples <= 0.0).mean())
+
+
+def holm_correction(pvalues, alpha=0.05):
+    """Holm-Bonferroni correction; returns adjusted p-values and flags."""
+    order = np.argsort(pvalues)
+    m = len(pvalues)
+    adjusted = np.empty(m, dtype=np.float64)
+    running = 0.0
+    for rank, idx in enumerate(order):
+        running = max(running, (m - rank) * pvalues[idx])
+        adjusted[idx] = min(running, 1.0)
+    return adjusted, [bool(adjusted[i] < alpha) for i in range(m)]
+
+
 @torch.inference_mode()
 def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
-             decay_override=None, check_cross_leak=True):
+             decay_override=None, check_cross_leak=True,
+             eval_seed_base=1_000_000_000):
     started_at = time.perf_counter()
     model, _, _ = load_model(
         checkpoint_dir, step, device, seed, segment_len=128,
         decay_override=decay_override,
     )
-    rows = build_eval_grid(n_rows=n_rows)
+    rows = build_eval_grid(n_rows=n_rows, seed_base=eval_seed_base)
     class_names = ("SALIENT", "ORDINARY")
     class_index = {name: index for index, name in enumerate(class_names)}
     correct = np.zeros((n_rows, 2), dtype=np.bool_)
@@ -136,6 +159,7 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
         flush=True,
     )
     all_results = {}
+    cell_records = []
     for bucket_index, delay in enumerate(DELAY_GRID):
         bucket_mask = buckets == bucket_index
         class_accuracy = {}
@@ -161,6 +185,19 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
                 if no_context_accuracy > no_context_null_interval[1]
                 else "WITHIN_NULL_CI"
             )
+            no_context_diff = (
+                no_context_values - no_context_null_values
+            )
+            no_context_pvalue = paired_bootstrap_pvalue(no_context_diff, rng)
+            cell_records.append({
+                "delay": int(delay),
+                "class": class_name,
+                "accuracy": no_context_accuracy,
+                "null": no_context_null,
+                "pvalue": no_context_pvalue,
+                "flag": no_context_flag,
+                "diff": no_context_diff,
+            })
             print(
                 f"NO_CONTEXT delay={delay} class={class_name} "
                 f"accuracy={no_context_accuracy:.6f} "
@@ -169,6 +206,7 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
                 f"permutation_null={no_context_null:.6f} "
                 f"permutation_ci95=[{no_context_null_interval[0]:.6f},"
                 f"{no_context_null_interval[1]:.6f}] "
+                f"pvalue={no_context_pvalue:.6f} "
                 f"flag={no_context_flag}",
                 flush=True,
             )
@@ -228,6 +266,42 @@ def evaluate(checkpoint_dir, step, seed, n_rows, batch_size, device,
             ),
             "paired_difference": float(paired.mean()),
         }
+    holm_pvalues = np.array(
+        [record["pvalue"] for record in cell_records], dtype=np.float64
+    )
+    holm_adjusted, holm_flags = holm_correction(holm_pvalues)
+    for record, adjusted, significant in zip(
+        cell_records, holm_adjusted, holm_flags
+    ):
+        print(
+            f"HOLM delay={record['delay']} class={record['class']} "
+            f"pvalue={record['pvalue']:.6f} "
+            f"holm_pvalue={adjusted:.6f} "
+            f"significant={'YES' if significant else 'NO'}",
+            flush=True,
+        )
+    pooled_no_context = no_context_correct.astype(np.float64).mean(axis=1)
+    pooled_no_context_null = no_context_permutation_matches.astype(
+        np.float64
+    ).mean(axis=1)
+    pooled_diff = pooled_no_context - pooled_no_context_null
+    pooled_interval = bootstrap_interval(pooled_no_context, rng)
+    pooled_null_interval = bootstrap_interval(pooled_no_context_null, rng)
+    pooled_pvalue = paired_bootstrap_pvalue(pooled_diff, rng)
+    pooled_flag = (
+        "ABOVE_NULL_CI"
+        if pooled_interval[0] > pooled_null_interval[1]
+        else "WITHIN_NULL_CI"
+    )
+    print(
+        f"NO_CONTEXT_POOLED accuracy={pooled_no_context.mean():.6f} "
+        f"ci95=[{pooled_interval[0]:.6f},{pooled_interval[1]:.6f}] "
+        f"permutation_null={pooled_no_context_null.mean():.6f} "
+        f"permutation_ci95=[{pooled_null_interval[0]:.6f},"
+        f"{pooled_null_interval[1]:.6f}] "
+        f"pvalue={pooled_pvalue:.6f} flag={pooled_flag}",
+        flush=True,
+    )
     cross_rows = buckets >= 2
     cross_accuracy_by_row = correct[cross_rows].astype(np.float64).mean(axis=1)
     cross_permutation_by_row = permutation_matches[cross_rows].astype(
@@ -270,6 +344,9 @@ def main():
     parser.add_argument("--device-batch-size", type=int, default=2)
     parser.add_argument("--n-rows", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=43)
+    parser.add_argument("--eval-seed-base", type=int,
+                        default=1_000_000_000,
+                        help="seed base for the eval stream")
     parser.add_argument("--rda-decays", default=None)
     parser.add_argument("--allow-cross-above-0.09",
                         dest="allow_cross_above_0_09",
@@ -285,6 +362,7 @@ def main():
         args.checkpoint_dir, args.step, args.seed, args.n_rows,
         args.device_batch_size, torch.device("cuda"), decay_override=decays,
         check_cross_leak=not args.allow_cross_above_0_09,
+        eval_seed_base=args.eval_seed_base,
     )
 
 
