@@ -2,9 +2,13 @@
 
 ## Setup and notation
 
-- **N counts paired rows per seed.** Each eval row has one SALIENT and
-  one ORDINARY event, both queried; the per-row outcome is the paired
-  difference (SALIENT minus ORDINARY).
+- **Evaluation N** is the total paired evaluation rows per seed across
+  all eight delay buckets (2 WITHIN, 6 CROSS 192-832); at N=8192 there
+  are 1,024 rows per delay. Each row has one SALIENT and one ORDINARY
+  event, both queried.
+- **Power-analysis N** is the pooled CROSS count per class:
+  N_total x 6/8. Thus, the planned N_total=8192 rows give N=6144
+  pooled CROSS rows per class for the power analysis.
 - In the earlier tables, **"seeds" means eval blocks only** (independent
   eval row blocks), not training seeds. The training-seed variance is
   modeled separately below.
@@ -12,8 +16,9 @@
   SALIENT-minus-ORDINARY gap, pooled over CROSS delays 192-832
   (delay buckets 192, 320, 448, 576, 704, 832).
 - Base accuracy per class: 0.0638020833333333 (D_const CROSS pooled).
-- Results below are from `power_analysis_did_gpu_v5.txt`: seed 20261011,
-  2,000 simulations per cell, with no bootstrap.
+- Results below are from `power_analysis_did_gpu_v5.txt` (N=4096 and
+  N=8192) and `power_analysis_did_gpu_v6_n6144.txt` (N=6144): seed
+  20261011, 2,000 simulations per cell, with no bootstrap.
 
 ## Minimum effect of interest
 
@@ -23,7 +28,8 @@ SALIENT-minus-ORDINARY gap pooled over CROSS delays 192-832.
 ## Pre-registered design
 
 - K=5 independent training seeds per arm (D and D_const).
-- N=8192 paired eval rows per training seed.
+- 8,192 total eval rows per training seed (6,144 pooled CROSS per class,
+  the power-analysis N).
 - Primary test: one-sided exact label-permutation test across the 2K
   per-seed eval gaps; reject at p <= 0.05. The minimum achievable p is
   1/252.
@@ -31,9 +37,12 @@ SALIENT-minus-ORDINARY gap pooled over CROSS delays 192-832.
   0.03125) and the threshold rule.
 - A, B', and C are secondary comparisons at 3 seeds and are outside
   this power analysis.
-- At delta=0.02, K=5, N=8192, v5 permutation power is 0.9975 for
-  sigma_seed=0.005, 0.8380 for sigma_seed=0.01, and 0.3995 for
-  sigma_seed=0.02.
+- At delta=0.02, K=5, planned power-analysis N=6144, v6 permutation
+  power is 0.9970 for sigma_seed=0.005, 0.8160 for sigma_seed=0.01,
+  and 0.4105 for sigma_seed=0.02.
+- This amendment is made before any main-grid hypothesis test; no
+  main-grid eval results were examined for this amendment or used to
+  choose or revise the power N or reported power values.
 
 ## Model and tests
 
@@ -78,14 +87,16 @@ and 0.7240 for permutation.
 All power results are conditional on the assumed sigma_seed. Estimate
 sigma_seed from the five real training seeds of both D_const and D
 before choosing K and N. If the estimate exceeds 0.01, report the
-minimum detectable effect at 80% power for K=5 and N=8192; do not
-interpret failure to detect the effect as evidence of its absence.
+minimum detectable effect at 80% power for K=5 and power-analysis
+N=6144 (8,192 total eval rows); do not interpret failure to detect the
+effect as evidence of its absence.
 
 ## Delta=0 size
 
-Entries are empirical rejection rates at delta=0 from the v5 log.
+Entries are empirical rejection rates at delta=0: v5 for its grid and
+v6 for K=5, N=6144.
 
-| K | N | sigma_seed | Sign-flip size | Threshold size | Permutation size |
+| K | N (pooled CROSS/class) | sigma_seed | Sign-flip size | Threshold size | Permutation size |
 |---|---:|---:|---:|---:|---:|
 | 3 | 1536 | 0.005 | 0.0000 | 0.0255 | 0.0450 |
 | 3 | 1536 | 0.01  | 0.0000 | 0.0260 | 0.0495 |
@@ -102,6 +113,9 @@ Entries are empirical rejection rates at delta=0 from the v5 log.
 | 5 | 4096 | 0.005 | 0.0280 | 0.0015 | 0.0405 |
 | 5 | 4096 | 0.01  | 0.0295 | 0.0005 | 0.0430 |
 | 5 | 4096 | 0.02  | 0.0290 | 0.0030 | 0.0380 |
+| 5 | 6144 | 0.005 | 0.0320 | 0.0015 | 0.0465 |
+| 5 | 6144 | 0.01  | 0.0310 | 0.0005 | 0.0495 |
+| 5 | 6144 | 0.02  | 0.0320 | 0.0030 | 0.0540 |
 | 5 | 8192 | 0.005 | 0.0290 | 0.0010 | 0.0495 |
 | 5 | 8192 | 0.01  | 0.0230 | 0.0000 | 0.0380 |
 | 5 | 8192 | 0.02  | 0.0340 | 0.0000 | 0.0465 |
@@ -113,10 +127,12 @@ the non-strict tail comparison.
 
 ## Full power table
 
-Each row is copied from the v5 log. Delta=0 is included as the null-size
-cell; other deltas are the simulated powers.
+The N=4096 and N=8192 rows are copied from the v5 log; the K=5,
+N=6144 rows are copied from v6. Here N is the pooled CROSS count per
+class. Delta=0 is included as the null-size cell; other deltas are the
+simulated powers.
 
-| K | N | sigma_seed | delta | Sign-flip | Threshold | Permutation |
+| K | N (pooled CROSS/class) | sigma_seed | delta | Sign-flip | Threshold | Permutation |
 |---|---:|---:|---:|---:|---:|---:|
 | 3 | 1536 | 0.005 | 0.0 | 0.0000 | 0.0255 | 0.0450 |
 | 3 | 1536 | 0.01 | 0.0 | 0.0000 | 0.0260 | 0.0495 |
@@ -193,6 +209,21 @@ cell; other deltas are the simulated powers.
 | 5 | 4096 | 0.005 | 0.05 | 1.0000 | 0.9995 | 1.0000 |
 | 5 | 4096 | 0.01 | 0.05 | 0.9960 | 0.9270 | 1.0000 |
 | 5 | 4096 | 0.02 | 0.05 | 0.8075 | 0.3510 | 0.9605 |
+| 5 | 6144 | 0.005 | 0.0 | 0.0320 | 0.0015 | 0.0465 |
+| 5 | 6144 | 0.01 | 0.0 | 0.0310 | 0.0005 | 0.0495 |
+| 5 | 6144 | 0.02 | 0.0 | 0.0320 | 0.0030 | 0.0540 |
+| 5 | 6144 | 0.005 | 0.01 | 0.4315 | 0.0795 | 0.6700 |
+| 5 | 6144 | 0.01 | 0.01 | 0.2260 | 0.0260 | 0.3665 |
+| 5 | 6144 | 0.02 | 0.01 | 0.0925 | 0.0075 | 0.1730 |
+| 5 | 6144 | 0.005 | 0.02 | 0.9060 | 0.5775 | 0.9970 |
+| 5 | 6144 | 0.01 | 0.02 | 0.6010 | 0.1580 | 0.8160 |
+| 5 | 6144 | 0.02 | 0.02 | 0.2435 | 0.0345 | 0.4105 |
+| 5 | 6144 | 0.005 | 0.03 | 0.9940 | 0.9445 | 1.0000 |
+| 5 | 6144 | 0.01 | 0.03 | 0.8735 | 0.4735 | 0.9885 |
+| 5 | 6144 | 0.02 | 0.03 | 0.4370 | 0.0750 | 0.6605 |
+| 5 | 6144 | 0.005 | 0.05 | 1.0000 | 1.0000 | 1.0000 |
+| 5 | 6144 | 0.01 | 0.05 | 0.9960 | 0.9510 | 1.0000 |
+| 5 | 6144 | 0.02 | 0.05 | 0.8075 | 0.3630 | 0.9630 |
 | 5 | 8192 | 0.005 | 0.0 | 0.0290 | 0.0010 | 0.0495 |
 | 5 | 8192 | 0.01 | 0.0 | 0.0230 | 0.0000 | 0.0380 |
 | 5 | 8192 | 0.02 | 0.0 | 0.0340 | 0.0000 | 0.0465 |
@@ -214,7 +245,7 @@ cell; other deltas are the simulated powers.
 `>0.05` marks extrapolation: no tested delta reached 0.80; the maximum
 observed power in the grid is shown.
 
-| K | N | sigma_seed | Sign-flip | Threshold | Permutation |
+| K | N (pooled CROSS/class) | sigma_seed | Sign-flip | Threshold | Permutation |
 |---|---:|---:|---:|---:|---:|
 | 3 | 1536 | 0.005 | >0.05 (max 0.0000) | 0.05 | 0.03 |
 | 3 | 1536 | 0.01 | >0.05 (max 0.0000) | 0.05 | 0.05 |
@@ -231,6 +262,9 @@ observed power in the grid is shown.
 | 5 | 4096 | 0.005 | 0.02 | 0.03 | 0.02 |
 | 5 | 4096 | 0.01 | 0.03 | 0.05 | 0.03 |
 | 5 | 4096 | 0.02 | 0.05 | >0.05 (max 0.3510) | 0.05 |
+| 5 | 6144 | 0.005 | 0.02 | 0.03 | 0.02 |
+| 5 | 6144 | 0.01 | 0.03 | 0.05 | 0.02 |
+| 5 | 6144 | 0.02 | 0.05 | >0.05 (max 0.3630) | 0.05 |
 | 5 | 8192 | 0.005 | 0.02 | 0.03 | 0.02 |
 | 5 | 8192 | 0.01 | 0.03 | 0.05 | 0.02 |
 | 5 | 8192 | 0.02 | 0.05 | >0.05 (max 0.3820) | 0.05 |

@@ -53,21 +53,43 @@ Minimum effect of interest: 0.02, defined as the D vs D_const
 difference in the SALIENT-minus-ORDINARY gap pooled over CROSS delays
 192-832.
 
-The pre-registered design uses K=5 training seeds per arm (D and
-D_const), with N=8192 paired eval rows per seed. The primary test is
-the one-sided exact label-permutation test across the 2K per-seed eval
-gaps, rejecting at p <= 0.05; its minimum achievable p-value is 1/252.
-The paired sign-flip test by seed index (minimum p=0.03125 at K=5) and
-the threshold rule are secondary. A, B', and C are secondary
-comparisons run at 3 seeds and are outside this power analysis.
+N for the evaluation design is the total paired evaluation rows per
+seed across all eight delay buckets (2 WITHIN, 6 CROSS 192-832), with
+1,024 rows per delay at N=8192. Each row contains one SALIENT and one
+ORDINARY event. The power-analysis N is the pooled CROSS count per
+class: N_total x 6/8 = 6,144 for the planned N_total=8,192-row
+evaluation. Thus, the planned design is K=5 training seeds per arm
+(D and D_const), 8,192 total eval rows per seed (6,144 pooled CROSS
+per class).
 
-For delta=0.02, K=5, N=8192, the v5 permutation power is 0.9975 at
-sigma_seed=0.005, 0.8380 at sigma_seed=0.01, and 0.3995 at
-sigma_seed=0.02. These values are conditional on the assumed
-sigma_seed, which must be estimated from the five real training seeds
-of both D_const and D. If that estimate exceeds 0.01, report the
-minimum detectable effect at 80% power for K=5 and N=8192 rather than
-interpreting a null result as evidence of absence.
+The primary test is the one-sided exact label-permutation test across
+the 2K per-seed eval gaps, rejecting at p <= 0.05; its minimum
+achievable p-value is 1/252. The paired sign-flip test by seed index
+(minimum p=0.03125 at K=5) and the threshold rule are secondary. A,
+B', and C are secondary comparisons run at 3 seeds and are outside
+this power analysis.
+
+At delta=0.02 and K=5, empirical power is:
+
+| Power-analysis N (pooled CROSS per class) | sigma_seed | Sign-flip | Threshold | Permutation | Source |
+|---:|---:|---:|---:|---:|---|
+| 4,096 | 0.005 | 0.8560 | 0.4410 | 0.9770 | v5 |
+| 4,096 | 0.01  | 0.5475 | 0.1375 | 0.7830 | v5 |
+| 4,096 | 0.02  | 0.2320 | 0.0290 | 0.3825 | v5 |
+| 6,144 | 0.005 | 0.9060 | 0.5775 | 0.9970 | v6 |
+| 6,144 | 0.01  | 0.6010 | 0.1580 | 0.8160 | v6 |
+| 6,144 | 0.02  | 0.2435 | 0.0345 | 0.4105 | v6 |
+| 8,192 | 0.005 | 0.9305 | 0.6405 | 0.9975 | v5 |
+| 8,192 | 0.01  | 0.5920 | 0.1685 | 0.8380 | v5 |
+| 8,192 | 0.02  | 0.2470 | 0.0310 | 0.3995 | v5 |
+
+The earlier v5 N=4096 and N=8192 rows use N as the pooled CROSS
+count per class; v6 N=6144 matches the planned 8,192 total eval rows.
+These powers are conditional on the assumed sigma_seed, which must be
+estimated from the five real training seeds of both D_const and D. If
+that estimate exceeds 0.01, report the minimum detectable effect at
+80% power for K=5 and power-analysis N=6144 rather than interpreting a
+null result as evidence of absence.
 
 The stop/null-reporting rule is to report the minimum detectable effect
 at 80% power for the chosen K and N. The CPU-GPU validation (differences
@@ -75,3 +97,7 @@ at 80% power for the chosen K and N. The CPU-GPU validation (differences
 earlier paired-row power analysis, not this difference-in-differences
 model with training-seed variance. Bootstrap reps were removed because
 no reported quantity used them.
+
+This amendment was made before any main-grid hypothesis test. No
+main-grid eval results were examined for this amendment or used to
+define the pooled-CROSS N and select the reported power values.
