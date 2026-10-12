@@ -46,3 +46,32 @@ Replication test (pre-registered before the rerun):
 - Decision rule: if no cell is significant under Holm AND the pooled test is within its null interval for both models, the original exceedance is judged a multiplicity artifact and the stop is lifted. Otherwise the stop stands and the leak path must be investigated before any further claims.
 
 For FUTURE runs only, the no-context control uses the pooled test plus Holm correction instead of the uncorrected per-cell rule.
+
+Power analysis
+--------------
+Minimum effect of interest: 0.02, defined as the D vs D_const
+difference in the SALIENT-minus-ORDINARY gap pooled over CROSS delays
+192-832.
+
+The pre-registered design uses K=5 training seeds per arm (D and
+D_const), with N=8192 paired eval rows per seed. The primary test is
+the one-sided exact label-permutation test across the 2K per-seed eval
+gaps, rejecting at p <= 0.05; its minimum achievable p-value is 1/252.
+The paired sign-flip test by seed index (minimum p=0.03125 at K=5) and
+the threshold rule are secondary. A, B', and C are secondary
+comparisons run at 3 seeds and are outside this power analysis.
+
+For delta=0.02, K=5, N=8192, the v5 permutation power is 0.9975 at
+sigma_seed=0.005, 0.8380 at sigma_seed=0.01, and 0.3995 at
+sigma_seed=0.02. These values are conditional on the assumed
+sigma_seed, which must be estimated from the five real training seeds
+of both D_const and D. If that estimate exceeds 0.01, report the
+minimum detectable effect at 80% power for K=5 and N=8192 rather than
+interpreting a null result as evidence of absence.
+
+The stop/null-reporting rule is to report the minimum detectable effect
+at 80% power for the chosen K and N. The CPU-GPU validation (differences
+0.016, 0.025, and 0.0195, within Monte Carlo error) applies only to the
+earlier paired-row power analysis, not this difference-in-differences
+model with training-seed variance. Bootstrap reps were removed because
+no reported quantity used them.
