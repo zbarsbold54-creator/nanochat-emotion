@@ -40,9 +40,17 @@ SALIENT-minus-ORDINARY gap pooled over CROSS delays 192-832.
 - At delta=0.02, K=5, planned power-analysis N=6144, v6 permutation
   power is 0.9970 for sigma_seed=0.005, 0.8160 for sigma_seed=0.01,
   and 0.4105 for sigma_seed=0.02.
-- This amendment is made before any main-grid hypothesis test; no
-  main-grid eval results were examined for this amendment or used to
-  choose or revise the power N or reported power values.
+- Power at delta 0.02, sigma_seed 0.01 (0.816) is within about 2 Monte
+  Carlo standard errors of the 0.80 target.
+- Before this amendment, the seed-43 evaluation rows for D and D_const
+  (pooled CROSS SALIENT/ORDINARY accuracy and gap, N=8192, eval seed
+  base 3,000,000,000) had been viewed descriptively; no seeds 101-104
+  results existed, and no hypothesis test (permutation, sign-flip or
+  threshold) had been run. The amendment corrects the definition of N
+  and adds the N=6144 power table; it changes no test, threshold,
+  minimum effect or K, and was prompted by the 6,144 denominator, not
+  by outcome values. Seed 43 also informed the calibration choices
+  (answer weight 20, no-context stop lift).
 
 ## Model and tests
 

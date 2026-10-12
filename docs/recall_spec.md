@@ -83,6 +83,9 @@ At delta=0.02 and K=5, empirical power is:
 | 8,192 | 0.01  | 0.5920 | 0.1685 | 0.8380 | v5 |
 | 8,192 | 0.02  | 0.2470 | 0.0310 | 0.3995 | v5 |
 
+Power at delta 0.02, sigma_seed 0.01 (0.816) is within about 2 Monte
+Carlo standard errors of the 0.80 target.
+
 The earlier v5 N=4096 and N=8192 rows use N as the pooled CROSS
 count per class; v6 N=6144 matches the planned 8,192 total eval rows.
 These powers are conditional on the assumed sigma_seed, which must be
@@ -98,6 +101,12 @@ earlier paired-row power analysis, not this difference-in-differences
 model with training-seed variance. Bootstrap reps were removed because
 no reported quantity used them.
 
-This amendment was made before any main-grid hypothesis test. No
-main-grid eval results were examined for this amendment or used to
-define the pooled-CROSS N and select the reported power values.
+Before this amendment, the seed-43 evaluation rows for D and D_const
+(pooled CROSS SALIENT/ORDINARY accuracy and gap, N=8192, eval seed base
+3,000,000,000) had been viewed descriptively; no seeds 101-104 results
+existed, and no hypothesis test (permutation, sign-flip or threshold)
+had been run. The amendment corrects the definition of N and adds the
+N=6144 power table; it changes no test, threshold, minimum effect or K,
+and was prompted by the 6,144 denominator, not by outcome values. Seed
+43 also informed the calibration choices (answer weight 20, no-context
+stop lift).
