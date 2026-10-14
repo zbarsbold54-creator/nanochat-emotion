@@ -646,7 +646,10 @@ if rda_active:
     rda_model = rda_model.to(device)
     model = rda_model
     if resuming:
-        model.load_state_dict(model_data, strict=True, assign=True)
+        # The optimizer was created from orig_model before the wrapper was
+        # built. Copy in place so assign=True cannot replace its Parameter
+        # objects with stale optimizer references.
+        model.load_state_dict(model_data, strict=True, assign=False)
         del model_data
     _decay_label = (", ".join("%.8g" % v for v in args.rda_decays)
                     if args.rda_decays is not None else "0.95")
