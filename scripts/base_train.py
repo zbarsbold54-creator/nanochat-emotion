@@ -20,6 +20,7 @@ import time
 import math
 import argparse
 import subprocess
+import shutil
 from dataclasses import asdict
 from contextlib import contextmanager
 
@@ -266,8 +267,12 @@ resuming = args.resume_from_step != -1
 if resuming:
     print0(f"Resuming optimization from step {args.resume_from_step}")
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
+    rng_path = os.path.join(checkpoint_dir, f"rng_{args.resume_from_step:06d}_rank{ddp_rank:d}.pt")
+    rng_data = torch.load(rng_path, map_location="cpu")
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data # free up this memory after the copy
+else:
+    rng_data = None
 
 # -----------------------------------------------------------------------------
 # FP8 training initialization and management (this has to be done before torch.compile)
@@ -884,6 +889,11 @@ else:
 
 
 # Go!
+if resuming and rng_data is not None:
+    torch.set_rng_state(rng_data["torch_cpu"])
+    if torch.cuda.is_available() and rng_data.get("torch_cuda"):
+        torch.cuda.set_rng_state_all(rng_data["torch_cuda"])
+    del rng_data
 while True:
     last_step = step == num_iterations # loop runs num_iterations+1 times so that we can eval/save at the end
     flops_so_far = num_flops_per_token * total_batch_size * step
@@ -1010,8 +1020,11 @@ while True:
         # covers the base trunk (keys prefixed "base.") plus state.* / predictor.*.
         model_state = (rda_model.state_dict() if rda_active
                        else orig_model.state_dict())
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        staging_dir = os.path.join(checkpoint_dir, f".checkpoint_{step:06d}.tmp")
+        os.makedirs(staging_dir, exist_ok=True)
         save_checkpoint(
-            checkpoint_dir,
+            staging_dir,
             step,
             model_state, # model parameters (includes RDA module when enabled)
             optimizer.state_dict(), # optimizer state
@@ -1035,6 +1048,24 @@ while True:
             },
             rank=ddp_rank,
         )
+        rng_staging_path = os.path.join(staging_dir, f"rng_{step:06d}_rank{ddp_rank:d}.pt")
+        torch.save({
+            "torch_cpu": torch.get_rng_state(),
+            "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+        }, rng_staging_path)
+        if is_ddp_initialized():
+            dist.barrier()
+        if ddp_rank == 0:
+            # Publish data files first and metadata last; metadata is the commit marker.
+            for rank in range(ddp_world_size):
+                for prefix in ("optim", "rng"):
+                    filename = f"{prefix}_{step:06d}_rank{rank:d}.pt"
+                    os.replace(os.path.join(staging_dir, filename), os.path.join(checkpoint_dir, filename))
+            os.replace(os.path.join(staging_dir, f"model_{step:06d}.pt"), os.path.join(checkpoint_dir, f"model_{step:06d}.pt"))
+            os.replace(os.path.join(staging_dir, f"meta_{step:06d}.json"), os.path.join(checkpoint_dir, f"meta_{step:06d}.json"))
+            shutil.rmtree(staging_dir, ignore_errors=True)
+        if is_ddp_initialized():
+            dist.barrier()
 
     # termination conditions (TODO: possibly also add loss explosions etc.)
     if last_step:
