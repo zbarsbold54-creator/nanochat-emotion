@@ -269,8 +269,11 @@ if resuming:
     model_data, optimizer_data, meta_data = load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
     rng_path = os.path.join(checkpoint_dir, f"rng_{args.resume_from_step:06d}_rank{ddp_rank:d}.pt")
     rng_data = torch.load(rng_path, map_location="cpu")
-    model.load_state_dict(model_data, strict=True, assign=True)
-    del model_data # free up this memory after the copy
+    # RDA checkpoints contain the wrapper's full state dict (base.*, state.*,
+    # predictor.*), so defer model loading until after GPTWithRDA is built.
+    if not args.rda:
+        model.load_state_dict(model_data, strict=True, assign=True)
+        del model_data
 else:
     rng_data = None
 
@@ -435,10 +438,6 @@ optimizer = model.setup_optimizer(
     matrix_lr=args.matrix_lr * batch_lr_scale,
     weight_decay=weight_decay_scaled,
 )
-
-if resuming:
-    optimizer.load_state_dict(optimizer_data)
-    del optimizer_data
 
 # -----------------------------------------------------------------------------
 # GradScaler for fp16 training (bf16/fp32 don't need it — bf16 has the same exponent range as fp32)
@@ -646,6 +645,9 @@ if rda_active:
                            decay=args.rda_decays if args.rda_decays is not None else 0.95)
     rda_model = rda_model.to(device)
     model = rda_model
+    if resuming:
+        model.load_state_dict(model_data, strict=True, assign=True)
+        del model_data
     _decay_label = (", ".join("%.8g" % v for v in args.rda_decays)
                     if args.rda_decays is not None else "0.95")
     print0(f"RDA ENABLED | n_drives=8 | decay={_decay_label} | persistence=decay-only | debug_steps={args.rda_debug_steps}")
@@ -886,9 +888,15 @@ if rda_active:
            f"{len(_grad_free)} grad-free by design (e_init, predictor.*)")
 else:
     rda_model = None
+    if resuming:
+        optimizer.load_state_dict(optimizer_data)
+        del optimizer_data
 
 
 # Go!
+if resuming and args.rda:
+    optimizer.load_state_dict(optimizer_data)
+    del optimizer_data
 if resuming and rng_data is not None:
     torch.set_rng_state(rng_data["torch_cpu"])
     if torch.cuda.is_available() and rng_data.get("torch_cuda"):
