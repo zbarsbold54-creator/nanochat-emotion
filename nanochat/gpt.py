@@ -472,7 +472,8 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False,
+                return_early_hidden=False):
         """
         return_hidden=False (the default, used everywhere else): the return value
         and all numerics are exactly as before.
@@ -540,6 +541,7 @@ class GPT(nn.Module):
         # `x` here is the pre-LM-head hidden state, i.e. exactly the signal the
         # RDA module consumes. Capture it BEFORE the head when asked.
         hidden = x if return_hidden else None
+        early_hidden = x_backout
 
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
@@ -551,9 +553,13 @@ class GPT(nn.Module):
             # training: given the targets, compute and return the loss
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+            if return_early_hidden:
+                return loss, hidden, early_hidden
             return (loss, hidden) if return_hidden else loss
         else:
             # inference: just return the logits directly
+            if return_early_hidden:
+                return logits, hidden, early_hidden
             return (logits, hidden) if return_hidden else logits
 
     @torch.inference_mode()

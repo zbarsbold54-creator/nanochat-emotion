@@ -120,6 +120,10 @@ parser.add_argument("--rda-const-state", action="store_true",
                          "per-position state. FiLM then carries no text-dependent "
                          "and no position-dependent information. Requires --rda; "
                          "has NO effect without it. Default OFF.")
+parser.add_argument("--rda-mech", action="store_true",
+                    help="add a learned early-hidden-state content write into the RDA drive")
+parser.add_argument("--rda-mech-const", action="store_true",
+                    help="capacity-matched constant-state control for --rda-mech")
 parser.add_argument("--rda-debug-steps", type=int, default=200,
                     help="number of steps to log E_t / E_hat_next / E_next / dpe norms")
 parser.add_argument("--rda-drive-wd", type=float, default=0.01,
@@ -135,6 +139,12 @@ parser.add_argument("--primal-debug-steps", dest="rda_debug_steps", type=int,
 parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
                     default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 args = parser.parse_args()
+if args.rda_mech:
+    args.rda = True
+if args.rda_mech_const:
+    args.rda_mech = True
+    args.rda = True
+    args.rda_const_state = True
 if args.segment_len < 0:
     parser.error("--segment-len must be 0 or a positive integer")
 if not 0.0 <= args.synthetic_recall_frac <= 1.0:
@@ -642,7 +652,8 @@ if rda_active:
     rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps,
                            const_state=args.rda_const_state,
                            const_state_seed=args.seed,
-                           decay=args.rda_decays if args.rda_decays is not None else 0.95)
+                           decay=args.rda_decays if args.rda_decays is not None else 0.95,
+                           mechanism=args.rda_mech)
     rda_model = rda_model.to(device)
     model = rda_model
     if resuming:
@@ -740,6 +751,8 @@ if rda_active:
     _drive_matrix = (list(rda_model.state.event_proj.parameters())
                      + list(rda_model.state.pe_proj.parameters())
                      + list(rda_model.state.h_norm.parameters()))
+    if rda_model.content_proj is not None:
+        _drive_matrix += list(rda_model.content_proj.parameters())
 
     _dmodel_lr_scale = (model_config_kwargs["n_embd"] / 768) ** -0.5
     # NOTE: the training loop rescales every group as
@@ -879,6 +892,8 @@ if rda_active:
         _grad_free = _grad_free | {id(p) for p in rda_model.state.event_proj.parameters()} \
                                    | {id(p) for p in rda_model.state.pe_proj.parameters()} \
                                    | {id(p) for p in rda_model.state.h_norm.parameters()}
+        if rda_model.content_proj is not None:
+            _grad_free = _grad_free | {id(p) for p in rda_model.content_proj.parameters()}
     for _g in optimizer.param_groups:
         if any(id(p) in _grad_free for p in _g["params"]):
             _g["grad_free"] = True

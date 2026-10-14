@@ -235,7 +235,7 @@ class RDAStateModule(nn.Module):
             out = out.to(dtype)
         return out.unsqueeze(0).expand(batch_size, -1).contiguous()
 
-    def update(self, E_t, hidden_state, prediction_error) -> torch.Tensor:
+    def update(self, E_t, hidden_state, prediction_error, content=None) -> torch.Tensor:
         """Advance the state by one step (GATED / convex-combination rule).
 
             E_next = decay * E_t + (1 - decay) * tanh(event_effect + pe_effect)
@@ -327,7 +327,10 @@ class RDAStateModule(nn.Module):
         ev = self.event_proj(self.h_norm(hidden_state))
         ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
         event_term = self.event_drive_scale * ev
-        drive = torch.tanh(event_term + self.pe_proj(pe_scaled))
+        drive_input = event_term + self.pe_proj(pe_scaled)
+        if content is not None:
+            drive_input = drive_input + content.to(drive_input.dtype)
+        drive = torch.tanh(drive_input)
         E_prev = E_t.to(drive.dtype)
         # Clamp the incoming state defensively so float drift can never push the
         # convex combination outside [-1, 1] and break the bound.
@@ -348,7 +351,7 @@ class RDAStateModule(nn.Module):
         return E_next
 
     # -- vectorized recurrence ---------------------------------------------
-    def drive_seq(self, hidden_seq, prediction_error_seq):
+    def drive_seq(self, hidden_seq, prediction_error_seq, content=None):
         """Per-position drive for a whole sequence, in one shot.
 
         The vectorized twin of the body of update(): the same arithmetic, the
@@ -385,7 +388,10 @@ class RDAStateModule(nn.Module):
         # every verification test would be measuring two different models.
         ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
         event_term = self.event_drive_scale * ev
-        return torch.tanh(event_term + self.pe_proj(pe / self.pe_reference_scale))
+        drive_input = event_term + self.pe_proj(pe / self.pe_reference_scale)
+        if content is not None:
+            drive_input = drive_input + content.to(drive_input.dtype)
+        return torch.tanh(drive_input)
 
     @staticmethod
     def _max_safe_T(decay, dtype):
@@ -744,7 +750,8 @@ class GPTWithRDA(nn.Module):
 
     def __init__(self, base_model, n_drives: int = N_DRIVES, decay=0.95,
                  debug_steps: int = 200, check_leakage: bool = True,
-                 const_state: bool = False, const_state_seed: int = 0):
+                 const_state: bool = False, const_state_seed: int = 0,
+                 mechanism: bool = False):
         super().__init__()
         self.base = base_model
         d_model = base_model.config.n_embd
@@ -752,6 +759,8 @@ class GPTWithRDA(nn.Module):
         self.n_drives = n_drives
         self.state = RDAStateModule(d_model, n_drives=n_drives, decay=decay)
         self.predictor = RDAPredictor(d_model, n_drives=n_drives)
+        self.content_proj = (nn.Linear(d_model, n_drives, bias=False)
+                             if mechanism else None)
         self.debug_steps = debug_steps
         self.check_leakage = check_leakage
         # CONTROL ARM C. When true, the tensor handed to FiLM is a learned
@@ -985,10 +994,16 @@ class GPTWithRDA(nn.Module):
 
         Returns a dict including "E_next" for the caller to carry forward.
         """
-        loss, hidden = self.base.forward(
+        base_out = self.base.forward(
             idx, targets, kv_cache=kv_cache,
             loss_reduction=loss_reduction, return_hidden=True,
+            return_early_hidden=self.content_proj is not None,
         )
+        if self.content_proj is not None:
+            loss, hidden, early_hidden = base_out
+        else:
+            loss, hidden = base_out
+            early_hidden = None
 
         # The two temporal slices. Different positions => different tensors.
         pre_outcome_hidden = hidden[:, :-1, :]   # (B, T-1, d_model)
@@ -1070,7 +1085,10 @@ class GPTWithRDA(nn.Module):
         # which is exactly the pre-update state the loop used.
         L = pre_outcome_hidden.size(1)
         if L > 0:
-            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq)
+            content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
+                               self.content_proj.weight.dtype))
+                           if self.content_proj is not None else None)
+            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
             E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
             # E_t entering the predictor at each position, shifted by one.
             E_in = torch.cat([E_start.unsqueeze(1), E_next_seq[:, :-1, :]], dim=1)
@@ -1094,7 +1112,12 @@ class GPTWithRDA(nn.Module):
             # FiLM still uses E_start (the state BEFORE this update), so the
             # token just decoded is never modulated by its own update.
             h_new = hidden[:, 0, :]                    # (B, d_model)
-            E_next = self.state.update(E_t, h_new, torch.zeros(B, device=device, dtype=E_t.dtype))
+            content = (self.content_proj(early_hidden[:, 0, :].to(
+                            self.content_proj.weight.dtype))
+                       if self.content_proj is not None else None)
+            E_next = self.state.update(E_t, h_new,
+                                       torch.zeros(B, device=device, dtype=E_t.dtype),
+                                       content=content)
             E_next_seq = E_next.new_zeros(B, 0, self.n_drives)
             E_hat_seq = E_next_seq
             dpe = E_next_seq
