@@ -79,7 +79,7 @@ function Run-Smoke([string]$jobDir,[string[]]$baseArgs) {
     $resume=Get-LatestCompleteCheckpoint $jobDir
     if (-not $seen15 -or $null -eq $resume -or $resume -lt 10) { throw "Smoke gate failed: seen15=$seen15 checkpoint=$resume" }
     Add-LogLines @("SMOKE_RESTART checkpoint=$resume")
-    $args=@($baseArgs,"--resume-from-step=$resume"); $out2=Join-Path $jobDir 'train_2.stdout.log'; $err2=Join-Path $jobDir 'train_2.stderr.log'
+    $args=@(); $args += $baseArgs; $args += "--resume-from-step=$resume"; $out2=Join-Path $jobDir 'train_2.stdout.log'; $err2=Join-Path $jobDir 'train_2.stderr.log'
     Assert-GpuChild; Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue
     $p2=Start-Process $python -ArgumentList ($args -join ' ') -WorkingDirectory $trainRoot -RedirectStandardOutput $out2 -RedirectStandardError $err2 -PassThru -Wait
     if (Test-Path $out2) { Add-LogLines @(Get-Content $out2 -Encoding UTF8) }; if (Test-Path $err2) { Add-LogLines @(Get-Content $err2 -Encoding UTF8) }
@@ -116,7 +116,7 @@ if (Test-Path $lockPath) {
 $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
 try {
     $lock.SetLength(0);$w=[IO.StreamWriter]::new($lock,[Text.UTF8Encoding]::new($false),1024,$true);$w.WriteLine($PID);$w.Flush();$w.Dispose();Add-LogLines @("RUN_START mode=$JobMode pid=$PID");Write-Status "Follow-up job has started." $JobMode "preparing" "unknown" "" "no mechanism test launched"
-    if($JobMode -eq 'MECH_GATED'){$smoke=Join-Path $root 'followup-smoke-gated';New-Item -ItemType Directory -Force $smoke|Out-Null;$smokeArgs=@('-m','scripts.base_train','--model-tag',$smoke,'--seed','43','--depth=2','--aspect-ratio=32','--head-dim=32','--max-seq-len=128','--window-pattern=L','--device-batch-size=1','--total-batch-size=4096','--num-iterations=20','--save-every=10','--eval-every=-1','--core-metric-every=-1','--sample-every=-1','--rda','--rda-gated-write');Run-Smoke $smoke $smokeArgs}
+    if($JobMode -eq 'MECH_GATED'){$smoke=Join-Path $root 'followup-smoke-gated';New-Item -ItemType Directory -Force $smoke|Out-Null;$smokeArgs=@('-m','scripts.base_train','--model-tag',$smoke,'--seed','43','--depth=2','--aspect-ratio=32','--head-dim=32','--max-seq-len=128','--window-pattern=L','--device-batch-size=1','--total-batch-size=16384','--num-iterations=20','--save-every=10','--eval-every=-1','--core-metric-every=-1','--sample-every=-1','--rda','--rda-gated-write');Run-Smoke $smoke $smokeArgs}
     $names=if($JobMode -eq 'MECH_GATED'){@('followup-gated-M-s43-w20','followup-gated-M-const-s43-w20')}else{@('recall-A-nomask-long-s43-w20')}
     foreach($name in $names){$dir=Join-Path $trainRoot $name;New-Item -ItemType Directory -Force $dir|Out-Null;$iters=if($JobMode -eq 'MECH_GATED'){'1200'}else{'3600'};$args=@('-m','scripts.base_train','--model-tag',$dir,'--seed','43','--depth=8','--aspect-ratio=96','--head-dim=128','--max-seq-len=1024','--window-pattern=L','--device-batch-size=2','--total-batch-size=32768',"--num-iterations=$iters",'--eval-every=300','--eval-tokens=524288','--core-metric-every=-1','--sample-every=-1','--synthetic-recall-frac=0.5','--recall-answer-weight=20');if($JobMode -eq 'MECH_GATED'){$args+='--segment-len=128';$args+='--rda';$args+='--rda-gated-write';if($name -like '*const*'){$args+='--rda-const-state'}};Run-Train $name $dir $args|Out-Null;Eval-Job $name $dir ([int]$iters) 43}
     Write-Status "Follow-up job completed." $JobMode "complete" "none" "" "eval_result.txt files saved before logging"
