@@ -122,6 +122,8 @@ parser.add_argument("--rda-const-state", action="store_true",
                          "has NO effect without it. Default OFF.")
 parser.add_argument("--rda-mech", action="store_true",
                     help="add a learned early-hidden-state content write into the RDA drive")
+parser.add_argument("--rda-gated-write", action="store_true",
+                    help="replace the decay/event/PE write with bounded gated early-hidden writes")
 parser.add_argument("--rda-mech-const", action="store_true",
                     help="capacity-matched constant-state control for --rda-mech")
 parser.add_argument("--rda-debug-steps", type=int, default=200,
@@ -140,6 +142,8 @@ parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
                     default=argparse.SUPPRESS, help=argparse.SUPPRESS)
 args = parser.parse_args()
 if args.rda_mech:
+    args.rda = True
+if args.rda_gated_write:
     args.rda = True
 if args.rda_mech_const:
     args.rda_mech = True
@@ -653,7 +657,8 @@ if rda_active:
                            const_state=args.rda_const_state,
                            const_state_seed=args.seed,
                            decay=args.rda_decays if args.rda_decays is not None else 0.95,
-                           mechanism=args.rda_mech)
+                           mechanism=args.rda_mech,
+                           gated_write=args.rda_gated_write)
     rda_model = rda_model.to(device)
     model = rda_model
     if resuming:
@@ -753,6 +758,8 @@ if rda_active:
                      + list(rda_model.state.h_norm.parameters()))
     if rda_model.content_proj is not None:
         _drive_matrix += list(rda_model.content_proj.parameters())
+    if rda_model.gate_proj is not None:
+        _drive_matrix += list(rda_model.gate_proj.parameters())
 
     _dmodel_lr_scale = (model_config_kwargs["n_embd"] / 768) ** -0.5
     # NOTE: the training loop rescales every group as
@@ -894,6 +901,8 @@ if rda_active:
                                    | {id(p) for p in rda_model.state.h_norm.parameters()}
         if rda_model.content_proj is not None:
             _grad_free = _grad_free | {id(p) for p in rda_model.content_proj.parameters()}
+        if rda_model.gate_proj is not None:
+            _grad_free = _grad_free | {id(p) for p in rda_model.gate_proj.parameters()}
     for _g in optimizer.param_groups:
         if any(id(p) in _grad_free for p in _g["params"]):
             _g["grad_free"] = True

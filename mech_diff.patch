@@ -1,0 +1,201 @@
+diff --git a/nanochat/gpt.py b/nanochat/gpt.py
+index 2a19647..c255211 100644
+--- a/nanochat/gpt.py
++++ b/nanochat/gpt.py
+@@ -472,7 +472,8 @@ class GPT(nn.Module):
+             group["initial_lr"] = group["lr"]
+         return optimizer
+ 
+-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False):
++    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False,
++                return_early_hidden=False):
+         """
+         return_hidden=False (the default, used everywhere else): the return value
+         and all numerics are exactly as before.
+@@ -540,6 +541,7 @@ class GPT(nn.Module):
+         # `x` here is the pre-LM-head hidden state, i.e. exactly the signal the
+         # RDA module consumes. Capture it BEFORE the head when asked.
+         hidden = x if return_hidden else None
++        early_hidden = x_backout
+ 
+         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
+         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
+@@ -551,9 +553,13 @@ class GPT(nn.Module):
+             # training: given the targets, compute and return the loss
+             # TODO experiment with chunked cross-entropy?
+             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
++            if return_early_hidden:
++                return loss, hidden, early_hidden
+             return (loss, hidden) if return_hidden else loss
+         else:
+             # inference: just return the logits directly
++            if return_early_hidden:
++                return logits, hidden, early_hidden
+             return (logits, hidden) if return_hidden else logits
+ 
+     @torch.inference_mode()
+diff --git a/nanochat/rda.py b/nanochat/rda.py
+index 0508267..36de948 100644
+--- a/nanochat/rda.py
++++ b/nanochat/rda.py
+@@ -235,7 +235,7 @@ class RDAStateModule(nn.Module):
+             out = out.to(dtype)
+         return out.unsqueeze(0).expand(batch_size, -1).contiguous()
+ 
+-    def update(self, E_t, hidden_state, prediction_error) -> torch.Tensor:
++    def update(self, E_t, hidden_state, prediction_error, content=None) -> torch.Tensor:
+         """Advance the state by one step (GATED / convex-combination rule).
+ 
+             E_next = decay * E_t + (1 - decay) * tanh(event_effect + pe_effect)
+@@ -327,7 +327,10 @@ class RDAStateModule(nn.Module):
+         ev = self.event_proj(self.h_norm(hidden_state))
+         ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+         event_term = self.event_drive_scale * ev
+-        drive = torch.tanh(event_term + self.pe_proj(pe_scaled))
++        drive_input = event_term + self.pe_proj(pe_scaled)
++        if content is not None:
++            drive_input = drive_input + content.to(drive_input.dtype)
++        drive = torch.tanh(drive_input)
+         E_prev = E_t.to(drive.dtype)
+         # Clamp the incoming state defensively so float drift can never push the
+         # convex combination outside [-1, 1] and break the bound.
+@@ -348,7 +351,7 @@ class RDAStateModule(nn.Module):
+         return E_next
+ 
+     # -- vectorized recurrence ---------------------------------------------
+-    def drive_seq(self, hidden_seq, prediction_error_seq):
++    def drive_seq(self, hidden_seq, prediction_error_seq, content=None):
+         """Per-position drive for a whole sequence, in one shot.
+ 
+         The vectorized twin of the body of update(): the same arithmetic, the
+@@ -385,7 +388,10 @@ class RDAStateModule(nn.Module):
+         # every verification test would be measuring two different models.
+         ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+         event_term = self.event_drive_scale * ev
+-        return torch.tanh(event_term + self.pe_proj(pe / self.pe_reference_scale))
++        drive_input = event_term + self.pe_proj(pe / self.pe_reference_scale)
++        if content is not None:
++            drive_input = drive_input + content.to(drive_input.dtype)
++        return torch.tanh(drive_input)
+ 
+     @staticmethod
+     def _max_safe_T(decay, dtype):
+@@ -744,7 +750,8 @@ class GPTWithRDA(nn.Module):
+ 
+     def __init__(self, base_model, n_drives: int = N_DRIVES, decay=0.95,
+                  debug_steps: int = 200, check_leakage: bool = True,
+-                 const_state: bool = False, const_state_seed: int = 0):
++                 const_state: bool = False, const_state_seed: int = 0,
++                 mechanism: bool = False):
+         super().__init__()
+         self.base = base_model
+         d_model = base_model.config.n_embd
+@@ -752,6 +759,8 @@ class GPTWithRDA(nn.Module):
+         self.n_drives = n_drives
+         self.state = RDAStateModule(d_model, n_drives=n_drives, decay=decay)
+         self.predictor = RDAPredictor(d_model, n_drives=n_drives)
++        self.content_proj = (nn.Linear(d_model, n_drives, bias=False)
++                             if mechanism else None)
+         self.debug_steps = debug_steps
+         self.check_leakage = check_leakage
+         # CONTROL ARM C. When true, the tensor handed to FiLM is a learned
+@@ -985,10 +994,16 @@ class GPTWithRDA(nn.Module):
+ 
+         Returns a dict including "E_next" for the caller to carry forward.
+         """
+-        loss, hidden = self.base.forward(
++        base_out = self.base.forward(
+             idx, targets, kv_cache=kv_cache,
+             loss_reduction=loss_reduction, return_hidden=True,
++            return_early_hidden=self.content_proj is not None,
+         )
++        if self.content_proj is not None:
++            loss, hidden, early_hidden = base_out
++        else:
++            loss, hidden = base_out
++            early_hidden = None
+ 
+         # The two temporal slices. Different positions => different tensors.
+         pre_outcome_hidden = hidden[:, :-1, :]   # (B, T-1, d_model)
+@@ -1070,7 +1085,10 @@ class GPTWithRDA(nn.Module):
+         # which is exactly the pre-update state the loop used.
+         L = pre_outcome_hidden.size(1)
+         if L > 0:
+-            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq)
++            content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
++                               self.content_proj.weight.dtype))
++                           if self.content_proj is not None else None)
++            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
+             E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
+             # E_t entering the predictor at each position, shifted by one.
+             E_in = torch.cat([E_start.unsqueeze(1), E_next_seq[:, :-1, :]], dim=1)
+@@ -1094,7 +1112,12 @@ class GPTWithRDA(nn.Module):
+             # FiLM still uses E_start (the state BEFORE this update), so the
+             # token just decoded is never modulated by its own update.
+             h_new = hidden[:, 0, :]                    # (B, d_model)
+-            E_next = self.state.update(E_t, h_new, torch.zeros(B, device=device, dtype=E_t.dtype))
++            content = (self.content_proj(early_hidden[:, 0, :].to(
++                            self.content_proj.weight.dtype))
++                       if self.content_proj is not None else None)
++            E_next = self.state.update(E_t, h_new,
++                                       torch.zeros(B, device=device, dtype=E_t.dtype),
++                                       content=content)
+             E_next_seq = E_next.new_zeros(B, 0, self.n_drives)
+             E_hat_seq = E_next_seq
+             dpe = E_next_seq
+diff --git a/scripts/base_train.py b/scripts/base_train.py
+index 84b544b..05803d7 100644
+--- a/scripts/base_train.py
++++ b/scripts/base_train.py
+@@ -120,6 +120,10 @@ parser.add_argument("--rda-const-state", action="store_true",
+                          "per-position state. FiLM then carries no text-dependent "
+                          "and no position-dependent information. Requires --rda; "
+                          "has NO effect without it. Default OFF.")
++parser.add_argument("--rda-mech", action="store_true",
++                    help="add a learned early-hidden-state content write into the RDA drive")
++parser.add_argument("--rda-mech-const", action="store_true",
++                    help="capacity-matched constant-state control for --rda-mech")
+ parser.add_argument("--rda-debug-steps", type=int, default=200,
+                     help="number of steps to log E_t / E_hat_next / E_next / dpe norms")
+ parser.add_argument("--rda-drive-wd", type=float, default=0.01,
+@@ -135,6 +139,12 @@ parser.add_argument("--primal-debug-steps", dest="rda_debug_steps", type=int,
+ parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
+                     default=argparse.SUPPRESS, help=argparse.SUPPRESS)
+ args = parser.parse_args()
++if args.rda_mech:
++    args.rda = True
++if args.rda_mech_const:
++    args.rda_mech = True
++    args.rda = True
++    args.rda_const_state = True
+ if args.segment_len < 0:
+     parser.error("--segment-len must be 0 or a positive integer")
+ if not 0.0 <= args.synthetic_recall_frac <= 1.0:
+@@ -642,7 +652,8 @@ if rda_active:
+     rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps,
+                            const_state=args.rda_const_state,
+                            const_state_seed=args.seed,
+-                           decay=args.rda_decays if args.rda_decays is not None else 0.95)
++                           decay=args.rda_decays if args.rda_decays is not None else 0.95,
++                           mechanism=args.rda_mech)
+     rda_model = rda_model.to(device)
+     model = rda_model
+     if resuming:
+@@ -740,6 +751,8 @@ if rda_active:
+     _drive_matrix = (list(rda_model.state.event_proj.parameters())
+                      + list(rda_model.state.pe_proj.parameters())
+                      + list(rda_model.state.h_norm.parameters()))
++    if rda_model.content_proj is not None:
++        _drive_matrix += list(rda_model.content_proj.parameters())
+ 
+     _dmodel_lr_scale = (model_config_kwargs["n_embd"] / 768) ** -0.5
+     # NOTE: the training loop rescales every group as
+@@ -879,6 +892,8 @@ if rda_active:
+         _grad_free = _grad_free | {id(p) for p in rda_model.state.event_proj.parameters()} \
+                                    | {id(p) for p in rda_model.state.pe_proj.parameters()} \
+                                    | {id(p) for p in rda_model.state.h_norm.parameters()}
++        if rda_model.content_proj is not None:
++            _grad_free = _grad_free | {id(p) for p in rda_model.content_proj.parameters()}
+     for _g in optimizer.param_groups:
+         if any(id(p) in _grad_free for p in _g["params"]):
+             _g["grad_free"] = True

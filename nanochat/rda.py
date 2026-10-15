@@ -530,6 +530,37 @@ class RDAStateModule(nn.Module):
         )
         return E
 
+    def gated_update(self, E_t, content, gate):
+        """Advance the bounded gated-write recurrence for one position."""
+        E_prev = torch.clamp(E_t.to(content.dtype), -1.0, 1.0)
+        c = torch.tanh(content)
+        g = gate.to(c.dtype)
+        E_next = (1.0 - g) * E_prev + g * c
+        assert E_next.abs().max() <= 1.0 + 1e-6, (
+            f"gated write escaped [-1, 1]: max|E_next|={E_next.abs().max()}"
+        )
+        return E_next
+
+    def gated_update_seq(self, E_start, content_seq, gate_seq):
+        """Vectorized gated recurrence, with the token path as its oracle."""
+        if content_seq.size(1) == 0:
+            return E_start.new_empty(E_start.size(0), 0, E_start.size(1))
+        c = torch.tanh(content_seq)
+        g = gate_seq.to(c.dtype)
+        # The write rates are sigmoid-bounded and the sequence is at most a
+        # training row, so fp32 prefix products are sufficient and keep this
+        # path close to the existing fp32 drive kernels on CPU.
+        q = 1.0 - g
+        write = g * c
+        retained = torch.cumprod(q, dim=1)
+        weighted = torch.cumsum(write / retained, dim=1)
+        states = retained * (E_start.to(c.dtype).unsqueeze(1) + weighted)
+        states = states.clamp(-1.0, 1.0)
+        assert states.abs().max() <= 1.0 + 1e-6, (
+            f"vectorized gated write escaped [-1, 1]: max|E_next|={states.abs().max()}"
+        )
+        return states
+
     def _update_seq_chunked(self, E_start, drive, limit):
         """update_seq() for L > limit, split into segments of `limit` steps.
 
@@ -751,7 +782,7 @@ class GPTWithRDA(nn.Module):
     def __init__(self, base_model, n_drives: int = N_DRIVES, decay=0.95,
                  debug_steps: int = 200, check_leakage: bool = True,
                  const_state: bool = False, const_state_seed: int = 0,
-                 mechanism: bool = False):
+                 mechanism: bool = False, gated_write: bool = False):
         super().__init__()
         self.base = base_model
         d_model = base_model.config.n_embd
@@ -759,8 +790,17 @@ class GPTWithRDA(nn.Module):
         self.n_drives = n_drives
         self.state = RDAStateModule(d_model, n_drives=n_drives, decay=decay)
         self.predictor = RDAPredictor(d_model, n_drives=n_drives)
+        self.gated_write = bool(gated_write)
         self.content_proj = (nn.Linear(d_model, n_drives, bias=False)
-                             if mechanism else None)
+                             if (mechanism or self.gated_write) else None)
+        self.gate_proj = None
+        if self.gated_write:
+            self.gate_proj = nn.Linear(d_model, n_drives, bias=False)
+            nn.init.normal_(self.content_proj.weight, mean=0.0,
+                            std=0.5 / math.sqrt(d_model))
+            nn.init.normal_(self.gate_proj.weight, mean=0.0, std=1e-3)
+            self.register_buffer("gate_bias", torch.linspace(
+                -5.0, -9.0, n_drives, dtype=torch.float32))
         self.debug_steps = debug_steps
         self.check_leakage = check_leakage
         # CONTROL ARM C. When true, the tensor handed to FiLM is a learned
@@ -804,6 +844,14 @@ class GPTWithRDA(nn.Module):
         # the value the Engine must feed back in as E_t_external on the next
         # step, so T=1 decoding continues the same recurrence.
         self.last_state = None
+
+    def _gated_terms(self, early_hidden):
+        """RMS-normalized early hidden to content and write rate."""
+        h = early_hidden.to(self.content_proj.weight.dtype)
+        h = h / h.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
+        content = self.content_proj(h)
+        gate = torch.sigmoid(self.gate_proj(h) + self.gate_bias.to(h.dtype))
+        return content, gate
 
     # -- reference implementation (sequential) ------------------------------
     def _update_loop_reference(self, E_t, pre_outcome_hidden, pe_seq):
@@ -1085,11 +1133,17 @@ class GPTWithRDA(nn.Module):
         # which is exactly the pre-update state the loop used.
         L = pre_outcome_hidden.size(1)
         if L > 0:
-            content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
-                               self.content_proj.weight.dtype))
-                           if self.content_proj is not None else None)
-            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
-            E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
+            if self.gated_write:
+                content_seq, gate_seq = self._gated_terms(early_hidden[:, :-1, :])
+                E_next_seq = self.state.gated_update_seq(
+                    E_start, content_seq, gate_seq)
+                drive = torch.tanh(content_seq)
+            else:
+                content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
+                                   self.content_proj.weight.dtype))
+                               if self.content_proj is not None else None)
+                drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
+                E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
             # E_t entering the predictor at each position, shifted by one.
             E_in = torch.cat([E_start.unsqueeze(1), E_next_seq[:, :-1, :]], dim=1)
             E_hat_seq = self.predictor.predict_seq(E_in, pre_outcome_hidden)
@@ -1112,12 +1166,16 @@ class GPTWithRDA(nn.Module):
             # FiLM still uses E_start (the state BEFORE this update), so the
             # token just decoded is never modulated by its own update.
             h_new = hidden[:, 0, :]                    # (B, d_model)
-            content = (self.content_proj(early_hidden[:, 0, :].to(
-                            self.content_proj.weight.dtype))
-                       if self.content_proj is not None else None)
-            E_next = self.state.update(E_t, h_new,
-                                       torch.zeros(B, device=device, dtype=E_t.dtype),
-                                       content=content)
+            if self.gated_write:
+                content, gate = self._gated_terms(early_hidden[:, 0, :])
+                E_next = self.state.gated_update(E_t, content, gate)
+            else:
+                content = (self.content_proj(early_hidden[:, 0, :].to(
+                                self.content_proj.weight.dtype))
+                           if self.content_proj is not None else None)
+                E_next = self.state.update(E_t, h_new,
+                                           torch.zeros(B, device=device, dtype=E_t.dtype),
+                                           content=content)
             E_next_seq = E_next.new_zeros(B, 0, self.n_drives)
             E_hat_seq = E_next_seq
             dpe = E_next_seq
