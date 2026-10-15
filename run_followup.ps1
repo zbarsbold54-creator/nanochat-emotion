@@ -65,28 +65,50 @@ function Run-Smoke([string]$jobDir,[string[]]$baseArgs) {
     Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue
     Add-LogLines @('TRAIN_START label=smoke attempt=1 resume_step=fresh')
     $p=Start-Process $python -ArgumentList ($baseArgs -join ' ') -WorkingDirectory $trainRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-    $seen15=$false; $t0=Get-Date
+    $seenStep=-1; $interrupted=$false; $t0=Get-Date
     while(-not $p.HasExited) {
         Start-Sleep 5; $p.Refresh()
         if (Test-Path $out) {
             $lines=Get-Content $out -Encoding UTF8
-            if (@($lines | Where-Object {$_ -match 'step\s+0*15/0*20'}).Count -gt 0) { $seen15=$true; if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { Stop-Process -Id $p.Id -Force; Add-LogLines @("SMOKE_KILL_ITER15 pid=$($p.Id)") } else { Add-LogLines @("SMOKE_CHILD_ALREADY_EXITED pid=$($p.Id)") }; break }
+            foreach($line in $lines) {
+                if ($line -match '^step\s+0*(\d+)/0*20') { $candidate=[int]$Matches[1]; if ($candidate -gt $seenStep) { $seenStep=$candidate } }
+            }
+            if ($seenStep -ge 15) {
+                if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { Stop-Process -Id $p.Id -Force; $interrupted=$true; Add-LogLines @("SMOKE_KILL_ITER15 pid=$($p.Id) seen_step=$seenStep") }
+                break
+            }
         }
         if (((Get-Date)-$t0).TotalMinutes -ge 10) { Stop-Process -Id $p.Id -Force; throw 'Smoke gate timeout before iteration 15.' }
     }
     try { Wait-Process -Id $p.Id -Timeout 30 -ErrorAction SilentlyContinue } catch {}
     $p.Refresh(); if (Test-Path $out) { Add-LogLines @(Get-Content $out -Encoding UTF8) }; if (Test-Path $err) { Add-LogLines @(Get-Content $err -Encoding UTF8) }
     $resume=Get-LatestCompleteCheckpoint $jobDir
-    if (-not $seen15 -or $null -eq $resume -or $resume -lt 10) { throw "Smoke gate failed: seen15=$seen15 checkpoint=$resume" }
+    if (-not $interrupted -or $seenStep -lt 15 -or $null -eq $resume -or $resume -ne 10) { throw "Smoke gate failed: interrupted=$interrupted seen_step=$seenStep checkpoint=$resume" }
     Add-LogLines @("SMOKE_RESTART checkpoint=$resume")
     $args=@(); $args += $baseArgs; $args += "--resume-from-step=$resume"; $out2=Join-Path $jobDir 'train_2.stdout.log'; $err2=Join-Path $jobDir 'train_2.stderr.log'
     Assert-GpuChild; Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue
     $p2=Start-Process $python -ArgumentList ($args -join ' ') -WorkingDirectory $trainRoot -RedirectStandardOutput $out2 -RedirectStandardError $err2 -PassThru -Wait
     if (Test-Path $out2) { Add-LogLines @(Get-Content $out2 -Encoding UTF8) }; if (Test-Path $err2) { Add-LogLines @(Get-Content $err2 -Encoding UTF8) }
     $all = if (Test-Path $out2) { Get-Content $out2 -Encoding UTF8 } else { @() }
-    $finite = @($all | Where-Object {$_ -match 'step\s+0*20/0*20' -and $_ -notmatch 'nan|inf'}).Count -gt 0
-    if ($p2.ExitCode -ne 0 -or -not $finite) { throw "Smoke restart failed exit=$($p2.ExitCode) finite_step20=$finite" }
-    Add-LogLines @("SMOKE_PASS restart_exit=$($p2.ExitCode) iteration20_finite=$finite")
+    $resumeLine = @($all | Where-Object {$_ -match 'Resuming optimization from step 10'} | Select-Object -First 1)
+    $resumeMatched = $resumeLine.Count -eq 1
+    if ($resumeMatched) { Add-LogLines @("SMOKE_RESUME_MATCH $resumeLine") }
+    $parsed=@()
+    foreach($line in $all) {
+        if ($line -match '^step\s+0*(\d+)/0*20.*loss:\s*([^\s|]+)') {
+            try { $parsed += [pscustomobject]@{Step=[int]$Matches[1]; Loss=[double]$Matches[2]} } catch {}
+        }
+    }
+    $post=@($parsed | Where-Object {$_.Step -ge 10})
+    $lastStep=if($post.Count){($post | Measure-Object Step -Maximum).Maximum}else{-1}
+    $badLoss=@($post | Where-Object {[double]::IsNaN($_.Loss) -or [double]::IsInfinity($_.Loss)}).Count
+    $finiteLosses=($post.Count -gt 0 -and $badLoss -eq 0)
+    $metaReadable=$false
+    try { $meta=Get-Content (Join-Path $jobDir 'meta_000020.json') -Raw | ConvertFrom-Json; $metaReadable=($meta.step -eq 20) } catch {}
+    $checkpoint20=($metaReadable -and (Test-Path (Join-Path $jobDir 'model_000020.pt')) -and (Test-Path (Join-Path $jobDir 'optim_000020_rank0.pt')))
+    $finite = ($p2.ExitCode -eq 0 -and $resumeMatched -and $lastStep -eq 19 -and $finiteLosses -and $checkpoint20)
+    if (-not $finite) { throw "Smoke restart failed exit=$($p2.ExitCode) resume_match=$resumeMatched last_step=$lastStep finite_losses=$finiteLosses checkpoint20=$checkpoint20" }
+    Add-LogLines @("SMOKE_PASS restart_exit=$($p2.ExitCode) resume_match=$resumeMatched last_step=$lastStep finite_losses=$finiteLosses checkpoint20=$checkpoint20")
 }
 function Eval-Job([string]$label,[string]$jobDir,[int]$step,[int]$seed) {
     $wrap=Join-Path $jobDir 'eval_nomask_wrapper.py'
