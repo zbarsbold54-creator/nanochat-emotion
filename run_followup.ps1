@@ -70,7 +70,7 @@ function Run-Smoke([string]$jobDir,[string[]]$baseArgs) {
         Start-Sleep 5; $p.Refresh()
         if (Test-Path $out) {
             $lines=Get-Content $out -Encoding UTF8
-            if (@($lines | Where-Object {$_ -match 'step\s+0*15/0*20'}).Count -gt 0) { $seen15=$true; Stop-Process -Id $p.Id -Force; Add-LogLines @("SMOKE_KILL_ITER15 pid=$($p.Id)"); break }
+            if (@($lines | Where-Object {$_ -match 'step\s+0*15/0*20'}).Count -gt 0) { $seen15=$true; if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { Stop-Process -Id $p.Id -Force; Add-LogLines @("SMOKE_KILL_ITER15 pid=$($p.Id)") } else { Add-LogLines @("SMOKE_CHILD_ALREADY_EXITED pid=$($p.Id)") }; break }
         }
         if (((Get-Date)-$t0).TotalMinutes -ge 10) { Stop-Process -Id $p.Id -Force; throw 'Smoke gate timeout before iteration 15.' }
     }
@@ -116,7 +116,7 @@ if (Test-Path $lockPath) {
 $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
 try {
     $lock.SetLength(0);$w=[IO.StreamWriter]::new($lock,[Text.UTF8Encoding]::new($false),1024,$true);$w.WriteLine($PID);$w.Flush();$w.Dispose();Add-LogLines @("RUN_START mode=$JobMode pid=$PID");Write-Status "Follow-up job has started." $JobMode "preparing" "unknown" "" "no mechanism test launched"
-    if($JobMode -eq 'MECH_GATED'){$smoke=Join-Path $root 'followup-smoke-gated';New-Item -ItemType Directory -Force $smoke|Out-Null;$smokeArgs=@('-m','scripts.base_train','--model-tag',$smoke,'--seed','43','--depth=2','--aspect-ratio=32','--head-dim=32','--max-seq-len=128','--window-pattern=L','--device-batch-size=1','--total-batch-size=128','--num-iterations=20','--save-every=10','--eval-every=-1','--core-metric-every=-1','--sample-every=-1','--rda','--rda-gated-write');Run-Smoke $smoke $smokeArgs}
+    if($JobMode -eq 'MECH_GATED'){$smoke=Join-Path $root 'followup-smoke-gated';New-Item -ItemType Directory -Force $smoke|Out-Null;$smokeArgs=@('-m','scripts.base_train','--model-tag',$smoke,'--seed','43','--depth=2','--aspect-ratio=32','--head-dim=32','--max-seq-len=128','--window-pattern=L','--device-batch-size=1','--total-batch-size=4096','--num-iterations=20','--save-every=10','--eval-every=-1','--core-metric-every=-1','--sample-every=-1','--rda','--rda-gated-write');Run-Smoke $smoke $smokeArgs}
     $names=if($JobMode -eq 'MECH_GATED'){@('followup-gated-M-s43-w20','followup-gated-M-const-s43-w20')}else{@('recall-A-nomask-long-s43-w20')}
     foreach($name in $names){$dir=Join-Path $trainRoot $name;New-Item -ItemType Directory -Force $dir|Out-Null;$iters=if($JobMode -eq 'MECH_GATED'){'1200'}else{'3600'};$args=@('-m','scripts.base_train','--model-tag',$dir,'--seed','43','--depth=8','--aspect-ratio=96','--head-dim=128','--max-seq-len=1024','--window-pattern=L','--device-batch-size=2','--total-batch-size=32768',"--num-iterations=$iters",'--eval-every=300','--eval-tokens=524288','--core-metric-every=-1','--sample-every=-1','--synthetic-recall-frac=0.5','--recall-answer-weight=20');if($JobMode -eq 'MECH_GATED'){$args+='--segment-len=128';$args+='--rda';$args+='--rda-gated-write';if($name -like '*const*'){$args+='--rda-const-state'}};Run-Train $name $dir $args|Out-Null;Eval-Job $name $dir ([int]$iters) 43}
     Write-Status "Follow-up job completed." $JobMode "complete" "none" "" "eval_result.txt files saved before logging"
