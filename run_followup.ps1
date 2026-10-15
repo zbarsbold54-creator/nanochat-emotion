@@ -57,6 +57,13 @@ e.main()
     $text=[IO.File]::ReadAllText($out,[Text.Encoding]::UTF8)+"`r`n===== STDERR =====`r`n"+[IO.File]::ReadAllText($err,[Text.Encoding]::UTF8);[IO.File]::WriteAllText($result,$text,[Text.UTF8Encoding]::new($false));Add-LogLines @("EVAL_END label=$label exit=$($p.ExitCode) result=$result");if($p.ExitCode -ne 0){throw "Evaluation $label failed exit=$($p.ExitCode)"}
 }
 
+$oldPid = 0
+if (Test-Path $lockPath) {
+    try { $oldPid = [int](Get-Content $lockPath -ErrorAction Stop | Select-Object -First 1) } catch { $oldPid = 0 }
+    if ($oldPid -gt 0 -and (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
+        throw "Another follow-up instance is live (PID $oldPid)."
+    }
+}
 $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
 try {
     $lock.SetLength(0);$w=[IO.StreamWriter]::new($lock,[Text.UTF8Encoding]::new($false),1024,$true);$w.WriteLine($PID);$w.Flush();$w.Dispose();Add-LogLines @("RUN_START mode=$JobMode pid=$PID");Write-Status "Follow-up job has started." $JobMode "preparing" "unknown" "" "no mechanism test launched"
