@@ -6,7 +6,7 @@ Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue
 $root = 'C:\AI\nanochat_mech'
 $main = 'C:\AI\nanochat'
 $trainRoot = if ($JobMode -eq 'MECH_GATED') { $root } else { $main }
-$python = Join-Path $trainRoot '.venv\Scripts\python.exe'
+$python = Join-Path $main '.venv\Scripts\python.exe'
 $statusPath = 'C:\AI\nanochat\STATUS_followup.md'
 $lockPath = Join-Path $root 'run_followup.pid'
 $logPath = Join-Path $root 'run_followup.log'
@@ -33,11 +33,12 @@ function Assert-GpuChild {
     Remove-Item Env:CUDA_VISIBLE_DEVICES -ErrorAction SilentlyContinue
     $probeOut = Join-Path $root 'gpu_probe.stdout.log'; $probeErr = Join-Path $root 'gpu_probe.stderr.log'
     $probe = 'import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))'
-    $pp = Start-Process $python -ArgumentList @('-c',$probe) -WorkingDirectory $trainRoot -RedirectStandardOutput $probeOut -RedirectStandardError $probeErr -PassThru -Wait
-    $device = if (Test-Path $probeOut) { (Get-Content $probeOut -Raw).Trim() } else { '' }
-    if ($pp.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($device)) {
+    Push-Location $trainRoot
+    try { & $python -c $probe 1> $probeOut 2> $probeErr; $probeExit=$LASTEXITCODE } finally { Pop-Location }
+    $device = if (Test-Path $probeOut) { ([IO.File]::ReadAllText($probeOut)).Trim() } else { '' }
+    if ($probeExit -ne 0 -or [string]::IsNullOrWhiteSpace($device)) {
         $detail = if (Test-Path $probeErr) { (Get-Content $probeErr -Raw).Trim() } else { 'no probe output' }
-        Add-LogLines @("STATUS GPU_PREFLIGHT_FAILED exit=$($pp.ExitCode) detail=$detail")
+        Add-LogLines @("STATUS GPU_PREFLIGHT_FAILED exit=$probeExit detail=$detail")
         Write-Status 'GPU preflight failed; no training child launched.' $JobMode 'failed' 'none' "GPU probe failed: $detail" 'fail closed'
         throw "GPU preflight failed: $detail"
     }
@@ -119,4 +120,4 @@ try {
     $names=if($JobMode -eq 'MECH_GATED'){@('followup-gated-M-s43-w20','followup-gated-M-const-s43-w20')}else{@('recall-A-nomask-long-s43-w20')}
     foreach($name in $names){$dir=Join-Path $trainRoot $name;New-Item -ItemType Directory -Force $dir|Out-Null;$iters=if($JobMode -eq 'MECH_GATED'){'1200'}else{'3600'};$args=@('-m','scripts.base_train','--model-tag',$dir,'--seed','43','--depth=8','--aspect-ratio=96','--head-dim=128','--max-seq-len=1024','--window-pattern=L','--device-batch-size=2','--total-batch-size=32768',"--num-iterations=$iters",'--eval-every=300','--eval-tokens=524288','--core-metric-every=-1','--sample-every=-1','--synthetic-recall-frac=0.5','--recall-answer-weight=20');if($JobMode -eq 'MECH_GATED'){$args+='--segment-len=128';$args+='--rda';$args+='--rda-gated-write';if($name -like '*const*'){$args+='--rda-const-state'}};Run-Train $name $dir $args|Out-Null;Eval-Job $name $dir ([int]$iters) 43}
     Write-Status "Follow-up job completed." $JobMode "complete" "none" "" "eval_result.txt files saved before logging"
-}catch{Add-LogLines @("RUN_FAIL $($_.Exception.Message)");Write-Status "Follow-up job stopped with an error." $JobMode "failed" "none" $_.Exception.Message "no further GPU job";throw}finally{$lock.Dispose()}
+}catch{$detail=($_ | Out-String).Trim();Add-LogLines @("RUN_FAIL $($_.Exception.Message)","RUN_FAIL_DETAIL $detail");Write-Status "Follow-up job stopped with an error." $JobMode "failed" "none" $_.Exception.Message "no further GPU job";throw}finally{$lock.Dispose()}
