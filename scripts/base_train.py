@@ -892,9 +892,16 @@ if rda_active:
     # diagnostics/probe_arm_c_decay.py. So "grad-free" here means "gets no
     # update", NOT "stays bit-identical to init".
     #
-    # SCOPE: guarded on the flag, so with --rda-const-state OFF this list is
-    # BYTE-FOR-BYTE the same two entries as before and baseline and B' are
-    # unaffected.
+    # GATED-WRITE ONLY. The gated write replaces the event/PE update path, so
+    # h_norm, event_proj and pe_proj are intentionally inert. Enrolment is
+    # retained for checkpoint/coverage compatibility; they receive explicit
+    # zero gradients below. This conditional is the only flag-on addition.
+    if args.rda_gated_write:
+        _grad_free = _grad_free | {id(p) for p in rda_model.state.event_proj.parameters()} \
+                                   | {id(p) for p in rda_model.state.pe_proj.parameters()} \
+                                   | {id(p) for p in rda_model.state.h_norm.parameters()}
+    # SCOPE: all additions above are guarded on opt-in flags, so flag-off
+    # behaviour remains byte-identical.
     if args.rda_const_state:
         _grad_free = _grad_free | {id(p) for p in rda_model.state.event_proj.parameters()} \
                                    | {id(p) for p in rda_model.state.pe_proj.parameters()} \
@@ -907,12 +914,16 @@ if rda_active:
         if any(id(p) in _grad_free for p in _g["params"]):
             _g["grad_free"] = True
 
+    _rda_inert_names = [n for n, p in rda_model.named_parameters()
+                        if id(p) in _grad_free]
+
     # NOTE: nn.Module.parameters() is a generator, so it needs len(list(...)).
     print0(f"RDA optimizer coverage: {len(list(rda_model.state.parameters()))} state + "
            f"{len(list(rda_model.predictor.parameters()))} predictor params enrolled "
            f"({len(_state_matrix) + len(_drive_matrix) + len(_state_vector) + len(_predictor_matrix)} tensors); "
            f"weight decay {args.rda_drive_wd} on event_proj/pe_proj; "
-           f"{len(_grad_free)} grad-free by design (e_init, predictor.*)")
+           f"{len(_grad_free)} grad-free by design")
+    print0("RDA inert parameters (zero-primed): " + ", ".join(_rda_inert_names))
 else:
     rda_model = None
     if resuming:
@@ -1238,19 +1249,16 @@ while True:
             scaler.scale(loss).backward()
         else:
             loss.backward()
-            # MuonAdamW requires a grad on every enrolled param. The RDA
-            # e_init and predictor.* are grad-free by design (nothing in the
-            # loss depends on them), so give them an explicit zero grad rather
-            # than letting the step crash. This must be re-done on EVERY
-            # backward: model.zero_grad(set_to_none=True) runs after each
-            # optimizer.step(), so the grads are None again by the next
-            # micro-step. Priming only once would survive step 0 and then
-            # crash on step 1.
-            for _g in optimizer.param_groups:
-                if _g.get("grad_free"):
-                    for _p in _g["params"]:
-                        if _p.grad is None:
-                            _p.grad = torch.zeros_like(_p)
+        # MuonAdamW requires a grad on every enrolled param. RDA's predictor,
+        # state seed, gated event/PE path, and constant-control-only paths can
+        # be structurally inert, so give them explicit zero grads rather than
+        # letting optim.py:73 call .float() on None. This is repeated after
+        # every backward because zero_grad(set_to_none=True) clears them.
+        for _g in optimizer.param_groups:
+            if _g.get("grad_free"):
+                for _p in _g["params"]:
+                    if _p.grad is None:
+                        _p.grad = torch.zeros_like(_p)
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     if answer_loss_sums is not None:
         if is_ddp_initialized():
