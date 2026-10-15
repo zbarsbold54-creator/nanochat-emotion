@@ -1,227 +1,134 @@
-# Persistent State and Feature-wise Conditioning in a Small Transformer
+# Persistent Functional State and Feature-Wise Conditioning in a Small Transformer: Negative Results and Methods
 
 *A toy-scale evaluation of the Regulatory Drive Architecture (RDA)*
 
+> Draft for internal review. Every number is sourced in [claims.md](claims.md). Unsourced items are marked [UNVERIFIED]; missing references are marked [CITE]; open decisions are marked [AUTHOR TO CONFIRM]. Open items are listed in [OPEN_ITEMS.md](OPEN_ITEMS.md).
+
 ## Abstract
 
-We evaluate whether a persistent, low-dimensional functional state changes
-language-model prediction or recall beyond the model's ordinary attention
-path. RDA carries eight named drive dimensions, updates them recurrently, and
-uses per-position causal FiLM conditioning. The names are design labels: this
-study does not measure or claim subjective emotion. [C01, C02]
+We report a toy-scale evaluation of a persistent, low-dimensional functional state, the Regulatory Drive Architecture (RDA), added to a small transformer. The state has eight named drive dimensions, a recurrent update with a decay parameter, and per-position FiLM conditioning. The names are design labels; the study does not measure or claim subjective emotion. [CF, Q01]
 
-In a FineWeb-Edu comparison at depth 8 and width 768, the three-seed mean
-final validation BPB was 1.293795 for baseline A, 1.276351 for dynamic-state
-B', and 1.275592 for constant-state C. The mean paired B'-minus-A difference
-was -0.017444; C was -0.000758 BPB below B'. Under the pre-set baseline-spread
-rule, the A-to-RDA change clears the recorded 0.0137 threshold, whereas the
-B'-to-C contrast does not. The result is consistent with a contribution from
-the shared FiLM pathway or capacity, not evidence that dynamic state content
-is necessary. [C03-C09]
+In a FineWeb-Edu comparison at depth 8 and width 768 over 600 iterations, three training seeds gave a mean final validation BPB of 1.293795 for the baseline (A), 1.276351 for dynamic-state RDA (B'), and 1.275592 for constant-state RDA (C). The mean paired B'-minus-A difference was -0.017444, and the mean C-minus-B' difference was -0.000758. Against a 0.0137 BPB yardstick, the mean A-to-RDA difference exceeds the yardstick in magnitude, and the mean B'-to-C difference does not. [LM]
 
-On the recall task, both D and D_const solve the two within-segment buckets
-but remain near 16-way chance on pooled cross-segment buckets. The paired
-training-seed difference-in-differences is +0.003418 for seed 43 and 0 for
-seed 101; only two seed pairs are available, below both the earlier
-three-seed claim rule and the later five-seed powered design. These results
-do not establish cross-segment recall or a state-content benefit.
-[C16-C20, C32-C38]
+A single-seed pilot of 4578 iterations (about 150 million tokens, width 512, a different window pattern) did not show the B'-versus-A difference: the final gap was -0.000270, and C was -0.001279 below B'. [PL, CF]
 
-This is a toy-scale, single-dataset study with few training seeds. It is
-descriptive rather than confirmatory; its corrections, incomplete grid, and
-unresolved artifacts are reported alongside the measurements. [C03, C20,
-C23-C29]
+On a synthetic recall task, the multi-timescale decay model (D) and its constant-state control (D_const) stayed near 16-way chance on cross-segment delays in two training seeds. The descriptive D-minus-D_const CROSS contrasts were +0.003418 (seed 43) and 0.000000 (seed 101). A positive control without segment masking recalled cross-segment items at 0.995-1.000, so the benchmark can detect cross-segment recall. [RG, PC]
+
+A back-of-envelope bound says that a single write into a decay-based state contributes at most about 1.9e-3 after 192 steps. [AN]
+
+The results support no demonstrated state-content effect and no cross-segment recall from the decay state. Errors that were corrected, interrupted and resumed runs, an incomplete recall grid, and an unfinished exploratory variant are reported in full.
+
+Keywords: persistent state; feature-wise linear modulation; recurrent state; language modelling; recall; negative result.
 
 ## 1. Introduction
 
-Transformers normally carry information through attention and their
-context-dependent activations. RDA adds a persistent functional state and
-asks whether it changes what the model remembers or predicts. The hypothesis
-is that a recurrent summary of prediction error and event information, fed
-back through causal, per-position conditioning, can change model behavior.
-This is a functional hypothesis, not a claim that the model feels, experiences,
-or has subjective emotion. [C01, C02]
+Transformers carry most information through attention and through context-dependent activations. RDA adds a persistent functional state and asks whether that state changes what the model predicts or remembers. The working hypothesis is that a recurrent summary of prediction error and event information, fed back through causal per-position conditioning, changes model behaviour. This is a functional hypothesis. It is not a claim that the model feels or experiences anything. [Q01]
 
-The study separates two possible sources of an observed language-model
-difference: the availability of the extra FiLM pathway and the content of a
-varying state carried by that pathway. A constant-state control retains the
-conditioning route while removing position-varying state. A separate recall
-task tests whether dynamic state supports cross-segment retrieval when
-attention is blocked between segments. [C03, C12]
+This report separates two possible sources of any language-model difference: the availability of the extra FiLM pathway, and the content of a varying state carried by that pathway. A constant-state control keeps the conditioning route and removes position-varying state. A separate recall task asks whether a decay-based state supports retrieval across segments when attention is blocked between them. [CF, Q03]
+
+The report contributes (a) a controlled comparison and a longer single-seed pilot, (b) a recall benchmark with an audit, a calibration record, and a positive control, (c) an account of errors, corrections, and interrupted runs, and (d) a back-of-envelope bound on what one write can contribute to a decay-based state. It is written as a negative-result and methods report. Null and negative results are stated as such.
 
 ## 2. Related Work
 
-The manuscript needs verified prior-work coverage before publication:
+The manuscript needs verified prior-work coverage before submission. No authors, titles, venues, or dates are given here from memory.
 
-- Nanochat and the base language-model training setup. [CITE: nanochat
-  architecture and training setup]
-- Feature-wise linear modulation and related conditioning methods.
-  [CITE: FiLM and feature-wise conditioning]
-- The optimizer components used by the training setup.
-  [CITE: Muon and AdamW]
-- Recurrent or persistent memory in language models.
-  [CITE: recurrent memory in language models]
-- Functional affect- or drive-like representations in machine learning.
-  [CITE: computational affect and drive representations; avoid claims about
-  subjective experience]
+- Nanochat and the base language-model training setup. [CITE: nanochat architecture and training setup]
+- Feature-wise linear modulation and related conditioning methods. [CITE: FiLM and feature-wise conditioning]
+- The optimizer components used by the training setup. [CITE: Muon and AdamW]
+- Recurrent or persistent memory in language models. [CITE: recurrent memory in language models]
+- Functional affect- or drive-like representations in machine learning. [CITE: computational affect and drive representations; avoid claims about subjective experience]
 
-No authors, titles, venues, or publication dates are supplied here from
-memory. The open-items list tracks these citation slots.
-
-## 3. Architecture and Experimental Arms
+## 3. Method
 
 ### 3.1 Persistent functional state
 
-The state E has eight dimensions named novelty, uncertainty, threat,
-integrity, agency, learning progress, arousal, and homeostatic deviation.
-The recurrent update is
+The state $E$ has eight dimensions: novelty, uncertainty, threat, integrity, agency, learning progress, arousal, and homeostatic deviation. It is updated recurrently as
 
-> E[t] = decay * E[t-1] + (1 - decay) * drive[t].
+$$E_t = \lambda\,E_{t-1} + (1-\lambda)\,\mathrm{drive}_t,$$
 
-The state conditions the transformer through FiLM. Conditioning is aligned
-per position using the state available before the current position's update;
-the later audit describes and tests this causal shift. The drive names are
-not emotion labels learned from supervision, and no measure of subjective
-experience is part of the objective or evaluation. [C01, C02]
+where $\lambda$ is the decay. The state conditions the residual stream through FiLM. Conditioning is per position and uses the state available before the current position's update. A later audit tests that causal shift. An earlier label leak in this path is described in Section 7.1. [Q01, Q02, Q07]
 
 ### 3.2 Arms
 
-The language-model comparison used A (no RDA flags), B' (RDA with dynamic
-state), and C (RDA with constant-state FiLM control). The later recall
-screen used D (multi-timescale decay) and D_const (its constant-state
-control). D used decay values 0.9, 0.95, 0.975, 0.9875, 0.99375, 0.996875,
-0.9984375, and 0.99921875. [C03, C10]
+- **A**: the unmodified baseline, with no RDA flags.
+- **B'**: RDA with dynamic state.
+- **C**: RDA with constant-state FiLM control (`--rda --rda-const-state`).
+- **D**: a multi-timescale variant with one decay per drive dimension. The eight decay values are 0.9, 0.95, 0.975, 0.9875, 0.99375, 0.996875, 0.9984375, and 0.99921875. [DS]
+- **D_const**: the constant-state control for D.
 
-## 4. Experimental Method
+### 3.3 Recall benchmark: design and validation
 
-### 4.1 Language-model comparison
+Each evaluation row holds two events, one SALIENT and one ORDINARY, and a query for each class. Answers come from 16 values, so chance accuracy is 0.0625. WITHIN delays are 16 and 48 tokens. CROSS delays are 192, 320, 448, 576, 704, and 832 tokens. A block-diagonal causal mask over 128-token segments prevents attention from crossing segments. [Q03, CF]
 
-The controlled A/B'/C comparison used FineWeb-Edu, depth 8, width 768,
-device batch size 2, and 600 training iterations. The comparison used
-training seeds 42, 43, and 44; B' and C results for seed 42 were reused from
-prior device-batch-2 logs rather than retrained in the comparison run. The
-optimizer configuration is recorded as MuonAdamW. [C03, C29]
+The corrected generator audit reports 2,048 evaluation rows and 4,096 events. All 512 possible (class, key, value) triples occur. Each of the 16 value IDs occurs 16 times among the 256 events of each class-delay stratum. Training and evaluation row identities are disjoint, with zero overlap. [CB, Q04]
 
-The baseline-spread decision threshold was set to 0.0137 BPB from an earlier
-three-seed A run. This is a rule for this small experiment, not a universal
-noise threshold or a formal population-level uncertainty estimate. [C09]
+Calibration selected answer weight 20. Weight 5 failed the delay-16 gate of 0.80 (SALIENT 0.062500, ORDINARY 0.062500). Weight 20 passed it (SALIENT 0.996094, ORDINARY 1.000000). The first passing weight was frozen for all arms. [CB]
 
-### 4.2 Recall benchmark
+A drive-manipulation check on the seed-43 D checkpoint passed, with a paired Cohen's d of 5.710474 (95% CI 5.533349 to 5.899485). [MC, Q06]
 
-Each evaluation row contains one SALIENT and one ORDINARY event. The answer
-is selected from 16 values, giving chance accuracy 0.0625. WITHIN delays are
-16 and 48 tokens; CROSS delays are 192, 320, 448, 576, 704, and 832. A
-block-diagonal causal attention mask uses 128-token segments, so information
-cannot pass between segments through attention. The primary contrast is the
-D-versus-D_const difference in the SALIENT-minus-ORDINARY gap pooled over
-CROSS delays 192-832. [C12]
+### 3.4 Pre-set decision rules and power
 
-The repaired generator audit found all 512 possible class/key/value triples,
-multiple values for each class/key combination, balanced value IDs within
-each class-delay stratum, and disjoint training and evaluation row identities.
-All recorded audit assertions passed. [C13]
+**Language-model yardstick.** The 0.0137 BPB value is the spread (maximum minus minimum) of the baseline A seeds in an earlier three-seed run. It is used as a decision yardstick for this comparison. The repository records describe it as a proposal, not a calibrated value, and it is not a noise estimate. [PW, Q20]
 
-Calibration froze answer weight 20 for every arm: weight 5 failed the
-delay-16 accuracy gate, while weight 20 passed it for both classes. The
-repaired calibration record gives 0.996094 SALIENT and 1.000000 ORDINARY
-accuracy at delay 16. An earlier pre-repair calibration file reports a
-different outcome; the repaired generator/calibration is the result used
-here, and the version distinction is documented in the open-items list.
-[C14, C15]
+**Recall.** The primary test is a one-sided exhaustive label-permutation test over the per-seed evaluation gaps, at p <= 0.05. At K=5 its minimum achievable p-value is 1/252 = 0.003968. The secondary tests are a paired sign-flip test (minimum 0.031250 at K=5) and a threshold rule. The planned design has K=5 training seeds and N = 6,144 pooled CROSS rows per class (6 delays x 1,024 rows). [PW, CB, CF, Q25]
 
-The D manipulation check on seed 43 passed, with paired Cohen's d 5.710474
-and a 95% interval [5.533349, 5.899485]. This check is not the separate
-positive control of arm A without segment masking. That positive-control
-result remains [PENDING: result not yet available]. [C15]
+At delta 0.02 and a seed SD of 0.01, simulated power was 0.6010 for the sign-flip test, 0.1580 for the threshold rule, and 0.8160 for the permutation test. These figures are conditional on the assumed seed variance; they are not observed power. At delta 0 and seed SD 0.01, the null rejection rates were 0.0310, 0.0005, and 0.0495 for the same three tests. [PW]
 
-### 4.3 Planned contrast and power analysis
+The spec records a minimum effect of interest of 0.02. This draft leaves the value for author confirmation: **[AUTHOR TO CONFIRM: minimum effect of interest]**. [PW]
 
-The protocol defines N as total paired evaluation rows per training seed
-across all eight delay buckets; the power-analysis N is the pooled CROSS
-row count per class. The planned primary design is five training seeds per
-arm and 8,192 total evaluation rows per seed, equivalent to 6,144 pooled
-CROSS rows per class. The earlier claim rule called for three seeds; the
-later amendment set the five-seed powered design. “Seeds” in the earlier
-power tables should not be confused with evaluation blocks. [C20, C21]
+Seed-43 recall rows were viewed descriptively before the power amendment. The record says the amendment changed the definition of N, and did not change the test, the threshold, the minimum effect, or K. [Q19]
 
-The protocol names the one-sided exhaustive label-permutation test over all
-2K per-seed evaluation gaps as primary, rejecting at p <= 0.05; its minimum
-achievable p-value at K=5 is 1/252. The paired exact sign-flip test by seed
-index and the threshold rule are secondary; the K=5 sign-flip minimum is
-0.03125. The sign-flip pairing is by seed index even though the D and
-D_const training seeds are independent. The threshold rejects when the
-estimated contrast exceeds the larger of the two within-arm spreads, each
-computed as the maximum minus minimum of that arm's K eval gaps. Its
-simulated null size ranged from 0.0000 to 0.0275 and was about 0.001 at
-K=5, so it is conservative rather than a calibrated test. The 5,000
-bootstrap repetitions in an earlier draft were removed because no reported
-quantity used them. The pre-existing protocol records a minimum effect of
-interest of 0.02, but this draft leaves the author-facing value open for
-confirmation: **Minimum effect of interest: [AUTHOR TO CONFIRM OR ENTER]**.
-Power at delta 0.02, K=5, N=6,144, and assumed seed SD 0.01 was 0.601 for
-sign-flip, 0.158 for the threshold rule, and 0.816 for permutation. These
-figures are conditional on the assumed seed variance, not observed power
-from the incomplete recall grid. [C21, C22]
+## 4. Experiments
 
-Seed-43 D/D_const recall rows had already been viewed descriptively before
-the power amendment. The amendment corrected the definition of N and added
-the matching N=6,144 row; the record says it did not change the test,
-threshold, minimum effect, or K and was prompted by the denominator rather
-than outcome values. [C21, C42]
+### 4.1 600-iteration A/B'/C comparison
 
-The null-reporting rule is to report the minimum detectable effect at 80%
-power for the chosen K and N rather than interpret a non-significant result
-as evidence of no effect. The recorded CPU-GPU validation differences
-(0.016, 0.025, and 0.0195) are described in the protocol as within Monte
-Carlo error; that validation concerned an earlier paired-row analysis, not
-the later model with training-seed variance. [C23]
+The comparison used FineWeb-Edu at depth 8, aspect ratio 96 (width 768), head dimension 128, window pattern L, device batch 2, and 32,768 tokens per step, for 600 iterations with validation every 50 steps. Seeds were 42, 43, and 44. Seed-42 B' and C runs were reused from earlier device-batch-2 logs and not retrained. The other seven runs were trained for this comparison. [CF, LM]
 
-## 5. Errors and Corrections
+### 4.2 Long pilot, seed 42
 
-### 5.1 One-token label leak
+The pilot ran A, B', and C for 4,578 iterations with seed 42, device batch 2, 32,768 tokens per step, and validation every 250 steps. That is about 150 million tokens per arm (4,578 x 32,768 = 150,011,904). The pilot did not use the 600-iteration width or window pattern. It used the default aspect ratio and window pattern, and it passed no head-dimension or window flags. Table 1 lists the differences. [PL, CF]
 
-An audit found that an earlier prediction-error slice allowed the FiLM state
-at a position to depend on the exact target token scored at that position.
-The apparent B'-seed-42 result, 1.226305 BPB against a 1.301217 baseline,
-and its 0.0749 BPB difference were measured with this leak and are withdrawn.
-The indexing was corrected and a no-label-leak regression test was added;
-the later audit reports that test passing at its probed positions. [C24]
+**Table 1.** Configuration of the 600-iteration comparison and the long pilot.
 
-### 5.2 Saturation
+| Setting | 600-iteration comparison | Long pilot |
+|---|---:|---:|
+| Depth (layers) | 8 | 8 |
+| Aspect ratio | 96 | 64 |
+| Width (n_embd) | 768 | 512 |
+| Head dimension | 128 | default (no flag passed) |
+| Window pattern | L | SSSL |
+| Device batch size | 2 | 2 |
+| Tokens per step | 32768 | 32768 |
+| Iterations | 600 | 4578 |
+| Validation interval (iterations) | 50 | 250 |
 
-LayerNorm did not bound the learned event projection. A short investigation
-isolated growth in the projection itself; normalizing its output controlled
-that mechanism. A separate PE/FiLM amplification path remained. Although a
-shorter production confirmation passed its bound, the subsequent 3,000-step
-no-abort run crossed the 0.98 state bound at step 1,353, peaked at 0.9848,
-and failed the predeclared long-horizon criteria. The stabilization should
-therefore not be described as establishing long-run state stability.
-[C25, C26]
+Arms ran sequentially under a resumable driver. Arm C was interrupted after its step-3000 checkpoint and resumed (Section 7.5). [PL]
 
-### 5.3 Arm-C slowdown
+### 4.3 Decay screen and evaluation-time ablations
 
-A short-run diagnostic measured C at about 2.5 times B' step time, but the
-reported explanation based on VRAM pressure was explicitly withdrawn:
-memory was static and similar across arms, measured shared-memory use was
-14.5 MiB, and the diagnostic concluded that there was no shared-memory
-spill. The cause remained open. A later controlled comparison reported C
-faster than B' by its median-step metric; this does not identify the cause
-of the earlier short-run slowdown. The manuscript therefore does not call
-the slowdown a VRAM-spill artifact. [C27, C28]
+The decay screen (branch `exp/multiscale-decay-20261011`, code commit 5bb8933) trained D and D_const on seed 43 for 600 iterations with the 600-iteration configuration. Three evaluation-time ablations were then run on the final checkpoint with `diagnostics/ablate_state.py`. V1 replaces the state with a constant, V2 shuffles state across rows, and V3 reverses time within each row. A V0 entry gives the unablated BPB. [DS, CF]
 
-### 5.4 Recall calibration correction
+### 4.4 Recall grid: D and D_const
 
-The pre-repair calibration stop file says both answer weights failed and
-training should stop. The repaired generator audit and subsequent
-calibration record show that weight 20 passed; the main D/D_const recall
-runs followed that repaired calibration. These are versioned results, not
-two measurements of one unchanged calibration. [C13-C15, C30]
+D and D_const were trained with training seeds 43 and 101, for 1,200 iterations each, with answer weight 20 and segment length 128. Each run was evaluated on 8,192 rows (1,024 per delay and class) with evaluation seed base 3,000,000,000. [RG, CF]
 
-## 6. Language-Model Results
+The recall driver planned five training seeds (43, 101, 102, 103, 104). Only seeds 43 and 101 produced results. The reason is not recorded **[UNVERIFIED]**. The seed-43 no-context decision marker in the results JSON records that the no-context stop was lifted. [CF, RG]
 
-### 6.1 A, B', and C
+**Provenance note.** The driver stopped after the eval-D_const-101 subprocess exited with code 0, before its completion record. The D-101 and D_const-101 entries were then promoted from the temporary artifact `main_d_dconst.json.tmp.promoted-20261014-191304`. The promoted artifact and the current JSON have identical SHA-256 digests. The JSON's top-level `completed` flag is false. Older `.bak` and `.pre-promote` copies exist in the same folder. [RG, Q18]
 
-Final validation BPB by seed:
+### 4.5 Positive control and manipulation check
+
+The positive control is arm A with segment masking disabled. It uses training seed 43 and checkpoint 1,200. Segment length is 0 in the training configuration and in evaluation, where a wrapper forces it to 0. It uses the same harness and readout as the recall grid. The folder `recall-A-nomask-s43-w20/` sits at the repository root and is untracked in this working tree. [PC, Q16]
+
+### 4.6 Exploratory gated-write variant
+
+A gated content-write variant of the state was developed on branch `mech2-20261015`. No result from it is reported; Section 9 describes its status. [MX]
+
+## 5. Results
+
+### 5.1 600-iteration comparison
+
+**Table 2.** Final validation BPB by seed, with the 600-iteration comparison's mean and sample SD.
 
 | Arm | Seed 42 | Seed 43 | Seed 44 | Mean (SD) |
 |---|---:|---:|---:|---:|
@@ -229,116 +136,209 @@ Final validation BPB by seed:
 | B' | 1.277996 | 1.275198 | 1.275858 | 1.276351 (0.001463) |
 | C | 1.277748 | 1.274950 | 1.274079 | 1.275592 (0.001917) |
 
-The paired B'-minus-A differences were -0.022684, -0.011916, and -0.017732
-for seeds 42, 43, and 44, respectively (mean -0.017444 BPB). The magnitude
-of the mean clears the recorded 0.0137 baseline-spread threshold. This is
-the result under that decision rule, not a general claim of improvement.
-[C04-C09]
+**Table 3.** Paired differences in final validation BPB.
 
-The paired C-minus-B' differences were -0.000248, -0.000248, and -0.001779
-(mean -0.000758 BPB). Their magnitude is below the 0.0137 threshold. Under
-the pre-set rule, the B'-versus-A difference is present in both dynamic and
-constant-state FiLM arms, while the dynamic-versus-constant contrast does
-not clear the threshold. The result is consistent with an effect of the
-shared RDA/FiLM pathway or capacity rather than evidence that dynamic state
-content is required. It does not identify a unique mechanism. [C08, C09]
+| Paired difference | Seed 42 | Seed 43 | Seed 44 | Mean |
+|---|---:|---:|---:|---:|
+| B' - A | -0.022684 | -0.011916 | -0.017732 | -0.017444 |
+| C - B' | -0.000248 | -0.000248 | -0.001779 | -0.000758 |
 
-### 6.2 Multi-timescale screen and eval-time ablations
+The B'-minus-A difference is negative in all three seeds. Its mean, -0.017444, is larger in magnitude than the 0.0137 yardstick. One seed's difference, -0.011916, is smaller than the yardstick, so the mean rather than each seed carries the comparison. The C-minus-B' differences are negative in all seeds (-0.000248 to -0.001779). Their mean, -0.000758, is smaller in magnitude than the yardstick. Median step time for seed 42 was 1273.24 ms for A, 1986.50 ms for B', and 1727.87 ms for C. C was faster than B' in these device-batch-2 runs. [LM]
 
-At the final screen checkpoint, D had validation BPB 1.275386 and D_const
-had 1.274947; the screen used seed 43. The difference does not favor D.
-The evaluation-time ablations on the D checkpoint changed BPB by +0.071142
-for V1 (constant-state replacement), +0.001628 for V2 (cross-row state
-shuffle), and +0.001070 for V3 (within-row time reversal). The corresponding
-D_const changes were all zero. Thus the small 0.001-0.002 changes apply to
-the shuffle/order perturbations, not to every meaning of “state content”;
-the larger V1 result is a single-checkpoint evaluation-time replacement
-and is not equivalent to comparing separately trained D and D_const arms.
-[C10, C11]
+### 5.2 Long pilot
 
-## 7. Recall Results
+**Table 4.** Validation BPB at selected steps for the single-seed pilot, with paired gaps.
 
-### 7.1 Per-delay accuracy
+| Step | A | B' | C | B' - A | C - B' |
+|---|---:|---:|---:|---:|---:|
+| 1500 | 1.191812 | 1.193531 | 1.191712 | +0.001719 | -0.001819 |
+| 3000 | 1.102528 | 1.104800 | 1.102870 | +0.002272 | -0.001930 |
+| 4250 | 1.060732 | 1.061305 | 1.059890 | +0.000573 | -0.001415 |
+| 4500 | 1.056270 | 1.056153 | 1.054840 | -0.000117 | -0.001313 |
+| 4578 (final) | 1.055337 | 1.055067 | 1.053788 | -0.000270 | -0.001279 |
 
-Each cell below is SALIENT / ORDINARY accuracy. N was 1,024 paired rows per
-delay bucket and class; each row contains both event classes. [C12, C20]
+The 600-iteration B'-minus-A advantage (mean -0.017444) is not present at 4,578 iterations. B' is above A at steps 1500, 3000, and 4250, by up to +0.002272 at step 3000. B' is below A only at steps 4500 and 4578, by -0.000117 and -0.000270. C is below B' at every reported step from 1500 onward. The final C-minus-B' gap is -0.001279, and the gaps across the five reported steps range from -0.001279 to -0.001930. [PL]
 
-| Arm / training seed | 16 | 48 | 192 | 320 | 448 | 576 | 704 | 832 |
+One seed gives no interval. The pilot configuration differs from the 600-iteration comparison, so these gaps cannot be attributed to FiLM or to state content. The 0.0137 yardstick comes from a three-seed 600-iteration run and is not applied to the pilot. [PL, PW, CF]
+
+The validation curve shows no visible break at the resume point. Between steps 3000 and 3250 the change was -0.009986 for A, -0.010200 for B', and -0.010394 for C. [PL]
+
+### 5.3 Decay screen and ablations
+
+At 600 iterations on seed 43, D's final validation BPB was 1.275386, and D_const's was 1.274947. The seed-43 references were 1.275198 for B' and 1.274950 for C. D did not reach a lower BPB than D_const. [DS]
+
+Replacing D's trained state with a constant (V1) raised its BPB by +0.071142. Cross-row shuffling (V2) raised it by +0.001628, and within-row time reversal (V3) by +0.001070. For D_const all three changes were zero, as expected for a constant state. [DS]
+
+The V1 result shows that D's trained network depends on its state at evaluation time. The same network does not reach a lower BPB than the constant-state arm, D_const. V1 is one checkpoint, and it is not a comparison of two trained arms. [DS, LM]
+
+### 5.4 Recall: per-delay accuracy
+
+Each cell shows SALIENT / ORDINARY accuracy, with 1,024 rows per cell.
+
+**Table 5.** Per-delay accuracy, D and D_const, seeds 43 and 101.
+
+| Run | Delay 16 | Delay 48 | Delay 192 | Delay 320 | Delay 448 | Delay 576 | Delay 704 | Delay 832 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| D / 43 | .996094/.998047 | .998047/.999023 | .063477/.062500 | .063477/.063477 | .060547/.061523 | .062500/.063477 | .061523/.061523 | .062500/.061523 |
-| D_const / 43 | .997070/1.000000 | 1.000000/1.000000 | .063477/.061523 | .055664/.059570 | .067383/.061523 | .058594/.066406 | .064453/.070312 | .057617/.068359 |
-| D / 101 | .997070/.999023 | 1.000000/1.000000 | .063477/.062500 | .062500/.062500 | .062500/.062500 | .062500/.062500 | .062500/.062500 | .062500/.062500 |
-| D_const / 101 | .997070/.999023 | 1.000000/1.000000 | .063477/.062500 | .062500/.062500 | .062500/.060547 | .061523/.063477 | .063477/.062500 | .062500/.063477 |
+| D, seed 43 | 0.996094 / 0.998047 | 0.998047 / 0.999023 | 0.063477 / 0.062500 | 0.063477 / 0.063477 | 0.060547 / 0.061523 | 0.062500 / 0.063477 | 0.061523 / 0.061523 | 0.062500 / 0.061523 |
+| D_const, seed 43 | 0.997070 / 1.000000 | 1.000000 / 1.000000 | 0.063477 / 0.061523 | 0.055664 / 0.059570 | 0.067383 / 0.061523 | 0.058594 / 0.066406 | 0.064453 / 0.070312 | 0.057617 / 0.068359 |
+| D, seed 101 | 0.997070 / 0.999023 | 1.000000 / 1.000000 | 0.063477 / 0.062500 | 0.062500 / 0.062500 | 0.062500 / 0.062500 | 0.062500 / 0.062500 | 0.062500 / 0.062500 | 0.062500 / 0.062500 |
+| D_const, seed 101 | 0.997070 / 0.999023 | 1.000000 / 1.000000 | 0.063477 / 0.062500 | 0.062500 / 0.062500 | 0.062500 / 0.060547 | 0.061523 / 0.063477 | 0.063477 / 0.062500 | 0.062500 / 0.063477 |
 
-Each row is extracted from its matching JSON `entries[]` record; the
-per-delay sample count and delay definitions are shared across rows.
-[C16-C19]
-The JSON's separate seed-43 record has a null arm and run_id, so it is not
-counted as a trained-arm result in this table. [C31]
+Both D and D_const solve the WITHIN delays (16 and 48) for both classes, with accuracy between 0.996094 and 1.000000. Across all four runs, the CROSS cells lie between 0.055664 and 0.067383, against a chance accuracy of 0.0625. [RG]
 
-### 7.2 Pooled CROSS contrast and null controls
+### 5.5 Recall: pooled CROSS contrast
 
-| Arm / seed | CROSS SALIENT | CROSS ORDINARY | SALIENT-minus-ORDINARY gap |
-|---|---:|---:|---:|
-| D / 43 | 0.062337 | 0.062337 | 0.000000 |
-| D_const / 43 | 0.061198 | 0.064616 | -0.003418 |
-| D / 101 | 0.062663 | 0.062500 | +0.000163 |
-| D_const / 101 | 0.062663 | 0.062500 | +0.000163 |
+**Table 6.** Pooled CROSS accuracy (delays 192-832, both classes), gap, and no-context control.
 
-The resulting paired D-minus-D_const differences in gaps are +0.003418
-(seed 43) and 0 (seed 101), a descriptive two-pair mean of +0.001709.
-There is no three- or five-seed contrast interval or confirmatory test in
-these results. For all four runs the no-context pooled control is flagged
-within its permutation-null interval; the reported pooled CROSS intervals
-include chance accuracy 0.0625. No cross-segment recall or state-content
-advantage is established by these data. [C20, C32-C37]
+| Run | CROSS SALIENT | CROSS ORDINARY | Gap (S - O) | Both-class 95% CI | No-context pooled | No-context flag |
+|---|---:|---:|---:|---:|---:|---:|
+| D, seed 43 | 0.062337 | 0.062337 | +0.000000 | [0.058105, 0.066813] | 0.061890 | WITHIN_NULL_CI |
+| D_const, seed 43 | 0.061198 | 0.064616 | -0.003418 | [0.058675, 0.067220] | 0.062988 | WITHIN_NULL_CI |
+| D, seed 101 | 0.062663 | 0.062500 | +0.000163 | [0.058431, 0.066895] | 0.062134 | WITHIN_NULL_CI |
+| D_const, seed 101 | 0.062663 | 0.062500 | +0.000163 | [0.058429, 0.066976] | 0.062012 | WITHIN_NULL_CI |
 
-### 7.3 Incomplete grid and result provenance
+The descriptive D-minus-D_const gap contrast is +0.003418 for seed 43 and 0.000000 for seed 101. Its two-pair mean is +0.001709. Two pairs give no interval or test, and the pre-set test was defined for the planned design. [RG, Q19]
 
-The older claim rule required three training seeds; the later powered plan
-specified five. The available paired grid contains only seeds 43 and 101,
-so it is incomplete under either plan. The driver log ends after the
-eval-D_const-101 subprocess exit and has no corresponding run-completion
-record. The precise reason it stopped is [UNVERIFIED]. [C21, C38, C40]
+All four pooled CROSS confidence intervals include chance (0.0625), and all four no-context pooled controls are flagged WITHIN_NULL_CI. [RG]
 
-The D-101 and D_const-101 entries in the current results JSON were recovered
-from the retained temporary-result artifact and promoted after the driver
-stopped before its normal result-commit step. The promoted artifact and
-current JSON contain the same data; the log records successful eval
-subprocess exits but not normal completion of the D_const-101 item. [C39]
+The two seed-101 runs have identical pooled CROSS values (accuracy 0.062663, gap +0.000163), although their per-delay values differ (Table 5). The records do not explain this, and it is listed as an open item. [RG]
 
-## 8. Discussion and Limitations
+### 5.6 Positive control
 
-The language-model comparison supports a narrow capacity-level reading:
-B' and C both outperform A under the recorded baseline-spread rule, while
-B' and C do not differ by that rule. The comparison therefore does not
-establish that dynamic state content accounts for the BPB difference. The
-recall evidence is likewise negative for cross-segment memory: D and
-D_const remain near chance in the CROSS buckets, and the available
-two-seed difference-in-differences is descriptive only. [C08-C09,
-C32-C38]
+**Table 7.** Positive control: arm A without segment masking, seed 43, checkpoint 1,200.
 
-These findings do not show that RDA improves language modeling generally,
-that the state carries useful cross-segment memories, or that any drive
-corresponds to subjective emotion. The language-model screen uses one
-natural-language corpus and a small model configuration, alongside a
-separate synthetic recall task. The primary recall grid has fewer training
-seeds than planned; the multi-timescale result and its ablations come from
-one seed and one checkpoint. The long-horizon saturation test also failed
-its declared criteria. [C03, C10-C11, C20, C26, C28, C41]
+| Delay | SALIENT | ORDINARY | No-context SALIENT | No-context ORDINARY |
+|---|---:|---:|---:|---:|
+| 16 | 1.000000 | 1.000000 | 0.064453 | 0.063477 |
+| 48 | 0.998047 | 1.000000 | 0.061523 | 0.059570 |
+| 192 | 0.995117 | 0.996094 | 0.061523 | 0.064453 |
+| 320 | 0.998047 | 0.999023 | 0.056641 | 0.067383 |
+| 448 | 0.997070 | 0.996094 | 0.063477 | 0.057617 |
+| 576 | 0.997070 | 0.998047 | 0.065430 | 0.057617 |
+| 704 | 1.000000 | 0.997070 | 0.064453 | 0.061523 |
+| 832 | 0.998047 | 0.999023 | 0.062500 | 0.058594 |
 
-The next tests should complete the pre-specified paired training-seed
-design, keep evaluation-row pairing and seed indexing explicit, estimate
-training-seed variance, and report the 80%-power minimum detectable effect
-for the chosen K and N. The author should confirm the minimum effect of
-interest before treating a null result as informative. The missing A
-without-mask positive control and the cause of the interrupted driver run
-remain open. [C15, C20-C23, C40]
+Arm A recalls both classes at 0.995117-1.000000 across CROSS delays 192-832, while its no-context control stays at 0.056641-0.067383. [PC]
 
-## 9. Conclusion
+The benchmark therefore detects cross-segment recall when attention is not blocked. The near-chance D and D_const results are thus not produced by a harness that cannot register cross-segment recall. The control tests the readout and harness on an attention-based path. It does not test a state-based path, and it uses one seed. [PC]
 
-At this toy scale, the observed language-model difference is shared by
-dynamic-state and constant-state FiLM arms, and the recall runs do not
-establish cross-segment retrieval. The data support neither a claim of
-subjective emotion nor a demonstrated state-content benefit. The incomplete
-recall grid and unresolved artifacts limit stronger conclusions.
+## 6. Analysis: why a decay-based state cannot carry a single write
+
+Under $E_t = \lambda E_{t-1} + (1-\lambda)\,x_t$, a single write $x_0$ contributes $(1-\lambda)\lambda^{\tau}$ to the state $\tau$ steps later. Maximising over $\lambda$ gives $\lambda^* = \tau/(\tau+1)$ and a maximum of
+
+$$\frac{1}{\tau+1}\left(\frac{\tau}{\tau+1}\right)^{\tau} \approx \frac{1}{e\,\tau}.$$
+
+**Table 8.** Single-write contribution $(1-\lambda)\lambda^{\tau}$ for the D decay set at delays 192 and 832, with the continuous maximum and the bound $1/(e\tau)$.
+
+| Decay (lambda) | tau = 192 | tau = 832 |
+|---|---:|---:|
+| 0.9 | 1.6389e-10 | 8.5068e-40 |
+| 0.95 | 2.6418e-06 | 1.4622e-20 |
+| 0.975 | 1.9356e-04 | 1.7774e-11 |
+| 0.9875 | 1.1170e-03 | 3.5627e-07 |
+| 0.99375 | 1.8754e-03 | 3.3920e-05 |
+| 0.996875 | 1.7134e-03 | 2.3116e-04 |
+| 0.9984375 | 1.1573e-03 | 4.2540e-04 |
+| 0.99921875 | 6.7239e-04 | 4.0774e-04 |
+| Grid maximum | 1.8754e-03 | 4.2540e-04 |
+| Continuous maximum | 1.9111e-03 | 4.4190e-04 |
+| Bound 1/(e tau) | 1.9160e-03 | 4.4216e-04 |
+
+For $\tau = 192$, the largest contribution over the D decay set is 1.8754e-03 (at $\lambda$ = 0.99375), against a continuous maximum of 1.9111e-03. For $\tau = 832$, it is 4.2540e-04 (at $\lambda$ = 0.9984375), against a continuous maximum of 4.4190e-04. An unsourced estimate of 2.3e-4 for $\tau = 832$ matches $\lambda$ = 0.996875 (2.3116e-04), not the grid maximum. [AN]
+
+This is a back-of-envelope bound on the information one write can carry in a decay-based state, measured in units of the drive. The state update is a convex combination, so the drive values bound the state [Q22]. It is not an experiment. It does not bound total information from many overlapping writes, and it does not cover a state with an explicit write path. [AN]
+
+## 7. Errors, corrections, and interrupted runs
+
+### 7.1 One-token label leak
+
+An earlier indexing error let the FiLM state at position $p$ depend on the token scored at $p$. Through an off-by-one index, the state at each position could depend on the token that position was scored on. The B'-seed-42 result of 1.226305 BPB, against a baseline of 1.301217 (a gain of 0.0749), measured this leak and is withdrawn. The E13-fixed verdict was withdrawn pending re-measurement, and BPB measurements from that period are not used here. [ER, Q07]
+
+Fix commit 969e067 corrected the indexing. The regression test `diagnostics/test_no_label_leak.py` randomises the FiLM weights before it checks them, and the sweep launcher now runs it as a hard pre-flight gate. [Q08]
+
+The 600-iteration comparison code (5566d90), the pilot driver (1cf28c1), and the decay screen (5bb8933) all descend from the fix. The ancestry of the recall-grid code is not recorded in its results **[UNVERIFIED]**. The later code review records the historical leak as not reproduced in the current tree. [Q07, Q08, Q24]
+
+### 7.2 Saturation of the event projection
+
+An earlier investigation found that the learned event projection could grow without bound. Normalising its output controlled that mechanism, while a separate PE/FiLM amplification path remained. A shorter bound check passed. A 3000-step run without abort was then evaluated against two criteria. The first required max|E| <= 0.98 at every step. The second required that the windowed maximum over the last 1000 steps should not rise. The run failed both. The first crossing was at step 1353, the peak was 0.9848 at step 1675, 151 steps exceeded 0.98, and the final value was 0.9737. [ER, Q11]
+
+The stabilisation should therefore not be described as long-run stable. [ER]
+
+### 7.3 Arm-C pace
+
+A short-run diagnostic measured arm C at about 2.5 times the per-step time of B'. [ER] An earlier pace report attributed the slowdown to VRAM pressure (96% of 8 GB, with repeated allocator flushes). The repository records withdraw that explanation. Peak VRAM was flat and nearly identical (7727 vs 7744 MiB). Shared GPU memory was 14.5 MiB, so no spill to system memory was measured. Idle VRAM before the run was 507 MiB. The cause is recorded as open. [ER, Q09]
+
+An unsourced account describes this slowdown as a VRAM spill at device batch 4. The records do not support a spill. E18 does not state its device batch size. The preceding E17 A/B flags use device batch 4 (line 2173). [ER, Q10]
+
+In the device-batch-2 comparison (Section 5.1), C was faster than B' per step. The 2.5x result therefore does not reproduce in that setting, and its cause is not identified. [LM]
+
+### 7.4 Recall calibration history
+
+The pre-repair calibration stop file says both answer weights failed and training should stop. After the generator was repaired and audited, weight 20 passed the gate and was frozen. The main recall runs followed the repaired calibration. These are two versions of the procedure, not repeated measurements of one unchanged calibration. [CB, Q05]
+
+### 7.5 Interrupted and resumed runs
+
+**Long pilot, arm C.** The last complete checkpoint before the interruption was step 3000 (driver log line 57, at 01:53:55). The next driver event was a stale-lock takeover at 06:01:46, about 4.1 hours later (line 58, old PID 29624). [PL]
+
+The driver then resumed arm C from step 3000 (line 61). Two resume attempts failed. The first failed because the checkpoint's state-dict keys did not match the model (`train.log` line 3495). Commit 0de329a, "Fix RDA checkpoint resume loading," was made between the first and second attempts. The second attempt failed in the optimizer step on a None gradient (`train.log` line 3662). Commit d5ceacd, "Preserve optimizer references on RDA resume," was made before the third attempt. The third attempt completed to step 4578 (`train.log` line 3730, driver line 79). The driver counted two retries for arm C. [PL, Q12, Q15]
+
+The validation curve shows no visible break at step 3000 (Section 5.2). The checkpoint metadata holds an identical data position for A, B', and C at step 3000 (pq_idx 3, rg_idx 7, epoch 1), and the resume path reads that metadata (`scripts/base_train.py` line 450). The driver marked the resumed data position as "approximate" and cleared that note after the next checkpoint. The records do not explain the annotation; it is an open item. [PL, Q13, Q14]
+
+The cause of the stop is **[UNVERIFIED]**. An unsourced account attributes it to a Windows servicing restart. The retained logs record only the stale-lock takeover. [PL]
+
+**Recall driver.** The recall driver stopped after the eval-D_const-101 subprocess exited with code 0. It wrote no completion record, and its log ends at line 3533. The cause is **[UNVERIFIED]**. [RG, Q17]
+
+## 8. Discussion
+
+### 8.1 What the evidence supports
+
+At 600 iterations and three seeds, both RDA arms ended with lower final validation BPB than the baseline in every seed. The mean A-to-RDA difference exceeds the pre-set yardstick. This is consistent with an effect of the shared RDA/FiLM pathway at short training, for example added capacity. It is the only language-model difference in this report that exceeds the yardstick. [LM]
+
+At 600 iterations, dynamic-state B' and constant-state C differ by less than the yardstick. [LM]
+
+### 8.2 What the evidence does not support
+
+- **The 600-iteration advantage is not a durable benefit.** It is absent in the single-seed pilot at about 150 million tokens (final B'-minus-A of -0.000270). [PL]
+- **No demonstrated state-content effect.** B' and C differ by -0.000758 at 600 iterations and by -0.001279 at the pilot's final step. The pilot is one seed. [LM, PL]
+- **No cross-segment recall from the decay state.** D and D_const sit at chance on CROSS delays in both seeds. The positive control shows the benchmark detects cross-segment recall when attention is available, so these nulls are interpretable at the level of this harness. [RG, PC]
+- **Decay-based state carries little per write.** Section 6 bounds the contribution of a single write for these decays. [AN]
+- **No claim about subjective experience.** The drive names are design labels. [Q01]
+
+### 8.3 What would be tested next
+
+1. A state with an explicit content write path, so that a write's effect is not limited by the decay bound. Such a variant must first pass the causality, leak, and equivalence tests on CPU.
+2. Completing the planned paired training-seed design for recall (seeds 43 and 101-104), estimating training-seed variance, and confirming the minimum effect of interest before interpreting any null.
+3. Replicating the pilot over more seeds, and running the 600-iteration and pilot configurations side by side, so that width, window pattern, and training length are not confounded.
+
+## 9. Limitations
+
+- **Scale and data.** One natural-language corpus (FineWeb-Edu) and one synthetic recall task. The model is toy scale (depth 8; widths 768 and 512). Training is short: 600 iterations for the comparison, 4,578 iterations (about 150 million tokens) for the pilot, and 1,200 iterations for recall. [CF]
+- **Seeds.** Three seeds at 600 iterations, one seed in the pilot, and two seeds in the recall grid. The planned recall design has five seeds, and the older claim rule had three. Two seeds meet neither. The reason only two were run is **[UNVERIFIED]**. No interval or test is reported for any two-seed contrast. [RG, CF]
+- **Configuration.** The pilot differs from the 600-iteration comparison in width (512 vs 768), window pattern (SSSL vs L), and validation interval (250 vs 50). Its head dimension uses the default. The pilot is not a continuation of the comparison, so width and window cannot be separated from training length. [CF]
+- **Reused runs.** The seed-42 B' and C results in the 600-iteration comparison were taken from earlier device-batch-2 logs and not retrained. [CF, LM]
+- **Yardstick status.** The 0.0137 value comes from a baseline seed spread, and the records describe it as a proposal. It is a yardstick, not a test. [PW, Q20]
+- **Interrupted runs.** The pilot's arm C was resumed through two code fixes. The recall driver stopped without a completion record. The D-101 and D_const-101 entries were promoted from a temporary artifact. [PL, RG]
+- **Identical pooled values.** The two seed-101 runs share pooled CROSS values, though their per-delay values differ. This is not explained. [RG]
+- **Row-value coincidence.** In the recall grid, 516 of 8,192 rows (6.30%) have equal SALIENT and ORDINARY values. This is close to the 1/16 rate expected from independent 16-way draws. Its effect on scoring has not been analysed. [RG, AN]
+- **Descriptive look.** The seed-43 recall rows were viewed descriptively before the power amendment. [Q19]
+- **Positive control.** One seed, attention-based. It validates the readout and harness, not a state-based path. [PC]
+- **Exploratory variant (no result).** A gated content-write variant of the state (branch `mech2-20261015`; commits ca5d85a, ffdc9ce, 0e6ef3a, 3e7466f) was implemented with tests for causality, leakage, and equivalence (`tests/test_gated_label_leak.py`, `tests/test_gated_optimizer.py`, `tests/test_mechanism_gated.py`). An unsourced account reports that those tests passed on CPU. No pass record was located **[UNVERIFIED]**. Its recall run did not complete. The status record (`STATUS_followup.md`) lists MECH_GATED as failed with the error "Smoke directory unexpectedly has checkpoint 20" (line 5). An unsourced account also reports a numerical failure, with non-finite state at about steps 12-19. No record of that was located **[UNVERIFIED]**. The cause is not isolated. No result from this variant is reported, and it is neither evidence for nor against any claim here. [MX]
+- **Metric.** BPB may not track the behaviour of interest. [Q23]
+- **Planning notes.** `METHODS.md`, `EXPERIMENTS.md`, and `LIMITATIONS.md` still describe some runs as not run. They are not the source of truth for this draft. [OPEN_ITEMS.md]
+
+## 10. Reproducibility
+
+- **600-iteration comparison.** Code commit 5566d90, launcher `run_ab_v3_dbs2_full.ps1`, outputs in `results/ab_v3_dbs2/`. Environment capture is in `logs/ab_v3_dbs2_full_env.txt`. [CF, LM]
+- **Long pilot.** Driver `run_lm_pilot.ps1` (commit 1cf28c1; resume fixes 0de329a and d5ceacd). Outputs are in `lm_pilot/{A,Bprime,C}/val_bpb.csv`, `lm_pilot/state.json`, and `lm_pilot/driver.log`. [PL]
+- **Decay screen.** Branch `exp/multiscale-decay-20261011`, code commit 5bb8933, launcher `run_ab_v3_dbs2_decay.ps1`, ablations `diagnostics/ablate_state.py`. Outputs are in `results/multiscale_decay/`. [DS]
+- **Recall grid.** Driver `run_recall_main_d_dconst.ps1`, evaluation `diagnostics/eval_recall.py`, outputs `results/recall_benchmark/main/main_d_dconst.json` and `.txt`. The provenance note is in Section 4.4. [RG, CF]
+- **Positive control.** `recall-A-nomask-s43-w20/` with `eval_nomask_wrapper.py`, `eval_result.txt`, and the driver log. [PC]
+- **Calibration and audit.** `results/recall_benchmark/calib/` (`generator_audit.txt`, `answer_weight_selection.txt`, `manip_check-D-s43-w20.txt`, which is UTF-16, and `power_analysis_did_gpu_v6_n6144.txt`). [CB, MC, PW]
+- **Leak test.** `diagnostics/test_no_label_leak.py`, run as the pre-flight gate. [Q08]
+- **Claims.** [claims.md](claims.md) gives the file and key or line for every number. The parser that produced it is not in the repository. Section 6 values are computed from the formula in the AN rows. [OPEN_ITEMS.md]
+- **Hardware and software.** Windows; NVIDIA GeForce RTX 5060 Ti (from the positive-control log); Python from the project virtual environment. [PC]
+- No GPU work was performed for this draft. All numbers were parsed from retained files.
+
+## 11. Conclusion
+
+At toy scale, the mean 600-iteration A-to-RDA difference exceeds the pre-set yardstick across three seeds. That difference is absent in a single-seed pilot at about 150 million tokens. The dynamic-state and constant-state arms do not differ beyond the yardstick. The decay-based state shows no cross-segment recall in two seeds, while the benchmark detects that recall when attention is available. The results support neither a demonstrated state-content benefit nor any claim about subjective emotion.
