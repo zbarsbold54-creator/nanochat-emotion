@@ -1,0 +1,21 @@
+2026-10-15 18:48:26,822 - nanochat.common - [32m[1mINFO[0m - Distributed world size: 1
+2026-10-15 18:48:26,824 - nanochat.common - [33m[1mWARNING[0m - Peak flops undefined for: NVIDIA GeForce RTX 5060 Ti, MFU will show as 0%
+2026-10-15 18:48:46,145 - nanochat.checkpoint_manager - [32m[1mINFO[0m - Saved model parameters to: C:\AI\nanochat_mech\followup-gated-M-s43-w20\.checkpoint_000000.tmp\model_000000.pt
+2026-10-15 18:48:46,148 - nanochat.checkpoint_manager - [32m[1mINFO[0m - Saved metadata to: C:\AI\nanochat_mech\followup-gated-M-s43-w20\.checkpoint_000000.tmp\meta_000000.json
+2026-10-15 18:48:46,149 - nanochat.checkpoint_manager - [32m[1mINFO[0m - Saved optimizer state to: C:\AI\nanochat_mech\followup-gated-M-s43-w20\.checkpoint_000000.tmp\optim_000000_rank0.pt
+Traceback (most recent call last):
+  File "C:\Users\HiTech\AppData\Roaming\uv\python\cpython-3.10-windows-x86_64-none\lib\runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "C:\Users\HiTech\AppData\Roaming\uv\python\cpython-3.10-windows-x86_64-none\lib\runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "C:\AI\nanochat_mech\scripts\base_train.py", line 1191, in <module>
+    per_token_loss = model(
+  File "C:\AI\nanochat\.venv\lib\site-packages\torch\nn\modules\module.py", line 1775, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "C:\AI\nanochat\.venv\lib\site-packages\torch\nn\modules\module.py", line 1786, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "C:\AI\nanochat_mech\nanochat\rda.py", line 1138, in forward
+    E_next_seq = self.state.gated_update_seq(
+  File "C:\AI\nanochat_mech\nanochat\rda.py", line 559, in gated_update_seq
+    assert states.abs().max() <= 1.0 + 1e-6, (
+AssertionError: vectorized gated write escaped [-1, 1]: max|E_next|=nan

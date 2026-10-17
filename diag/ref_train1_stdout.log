@@ -1,0 +1,331 @@
+
+                                                       █████                █████
+                                                      ░░███                ░░███
+     ████████    ██████   ████████    ██████   ██████  ░███████    ██████  ███████
+    ░░███░░███  ░░░░░███ ░░███░░███  ███░░███ ███░░███ ░███░░███  ░░░░░███░░░███░
+     ░███ ░███   ███████  ░███ ░███ ░███ ░███░███ ░░░  ░███ ░███   ███████  ░███
+     ░███ ░███  ███░░███  ░███ ░███ ░███ ░███░███  ███ ░███ ░███  ███░░███  ░███ ███
+     ████ █████░░████████ ████ █████░░██████ ░░██████  ████ █████░░███████  ░░█████
+    ░░░░ ░░░░░  ░░░░░░░░ ░░░░ ░░░░░  ░░░░░░   ░░░░░░  ░░░░ ░░░░░  ░░░░░░░░   ░░░░░
+    
+TREE: DIRTY -- this run did NOT execute the committed code alone.
+  commit=fa9fe794af6e6ba8ff56c1126ad4db341aeaab3f
+  Uncommitted changes present at start:
+    ?? followup-gated-M-s43-w20/
+    ?? followup-smoke-gated/
+    ?? followup-smoke-gated_failed_20261015-183413/
+    ?? followup-smoke-gated_failed_20261015-183649/
+    ?? followup-smoke-gated_failed_20261015-184111/
+    ?? followup-smoke-gated_failed_20261015-184216/
+    ?? followup-smoke-gated_failed_20261015-184433/
+    ?? gated_write_commit.patch
+    ?? gpu_probe.stderr.log
+    ?? gpu_probe.stdout.log
+    ?? run_followup.log
+    ?? run_followup.pid
+  diff_sha256=098abb13b039422c8de1912dad2eccce882a6381d427568f13bd5eb57832c4d7
+Autodetected device type: cuda
+GPU: NVIDIA GeForce RTX 5060 Ti | Peak FLOPS (BF16): inf
+COMPUTE_DTYPE: torch.bfloat16 (auto-detected: CUDA SM 120 (bf16 supported))
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback
+WARNING: Training will be less efficient without FA3
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+Vocab size: 32,768
+Model config:
+{
+  "sequence_len": 1024,
+  "vocab_size": 32768,
+  "n_layer": 8,
+  "n_head": 6,
+  "n_kv_head": 6,
+  "n_embd": 768,
+  "window_pattern": "L",
+  "segment_len": 128
+}
+WARNING: torch.compile disabled (Triton unavailable on this platform); running eager. Slower, same numerics.
+Parameter counts:
+wte                     : 25,165,824
+value_embeds            : 100,663,296
+lm_head                 : 25,165,824
+transformer_matrices    : 56,623,392
+scalars                 : 42
+total                   : 207,618,378
+Estimated FLOPs per token: 5.662329e+08
+Scaling LRs by 0.2500 for batch size 32,768 (reference: 524,288)
+Scaling weight decay from 0.280000 to 0.195865 for depth 8
+Scaling the LR for the AdamW parameters ∝1/√(768/768) = 1.000000
+Using user-provided number of iterations: 1,200
+Total number of training tokens: 39,321,600
+Tokens : Scaling params ratio: 0.48
+Total training FLOPs estimate: 2.226518e+16
+Tokens / micro-batch / rank: 2 x 1024 = 2,048
+Tokens / micro-batch: 2,048
+Total batch size 32,768 => gradient accumulation steps: 16
+======================================================================
+RDA LABEL-LEAK REGRESSION TEST
+======================================================================
+device=cuda  d_model=64 layers=2 T=128 B=2 vocab=512
+  |film_scale.W|=213.9555  |film_shift.W|=204.1984
+  y[p]==x[p+1] fraction: 1.000000
+  preconditions OK (non-vacuous)
+
+--- CHECK 1: change y[:,k] alone; logits[:, :k+1] must be identical ---
+  k=0    logits[:, :1] bit-identical: YES   | pos>k moved: 3.604e-06
+  k=1    logits[:, :2] bit-identical: YES   | pos>k moved: 2.658e-06
+  k=2    logits[:, :3] bit-identical: YES   | pos>k moved: 1.230e-06
+  k=3    logits[:, :4] bit-identical: YES   | pos>k moved: 8.494e-07
+  k=17   logits[:, :18] bit-identical: YES   | pos>k moved: 1.370e-06
+  k=64   logits[:, :65] bit-identical: YES   | pos>k moved: 1.226e-06
+  k=126  logits[:, :127] bit-identical: YES   | pos>k moved: 9.527e-07
+  k=127  logits[:, :128] bit-identical: YES   | pos>k moved: 0.000e+00
+
+--- CHECK 2: change x[:,k] alone; logits[:, :k] must be identical ---
+  k=1    logits[:, :1] bit-identical: YES
+  k=2    logits[:, :2] bit-identical: YES
+  k=3    logits[:, :3] bit-identical: YES
+  k=17   logits[:, :17] bit-identical: YES
+  k=64   logits[:, :64] bit-identical: YES
+  k=126  logits[:, :126] bit-identical: YES
+  k=127  logits[:, :127] bit-identical: YES
+
+--- CHECK 3: randomize all labels at positions >= p; ---
+---           logits[:, :p+1] must be identical                 ---
+  p=1    all labels >= 1 randomized; logits[:, :2] identical: YES
+  p=2    all labels >= 2 randomized; logits[:, :3] identical: YES
+  p=17   all labels >= 17 randomized; logits[:, :18] identical: YES
+  p=64   all labels >= 64 randomized; logits[:, :65] identical: YES
+  p=127  all labels >= 127 randomized; logits[:, :128] identical: YES
+
+======================================================================
+RESULT: PASS -- invariant holds at every probed position.
+  film_state[p] depends on y[j] only for j < p.
+PRE-FLIGHT: label-leak regression test PASSED
+RDA ENABLED | n_drives=8 | decay=0.95 | persistence=decay-only | debug_steps=200
+  persistence: 1/e horizon = 19.5 positions (= 1.9% of a 1024-token row); carried state reaches t=100 of a row at 5.9e-03
+RDA optimizer coverage: 11 state + 4 predictor params enrolled (17 tensors); weight decay 0.01 on event_proj/pe_proj; 11 grad-free by design
+RDA inert parameters (zero-primed): state.e_init, state.h_norm.weight, state.h_norm.bias, state.event_proj.weight, state.event_proj.bias, state.pe_proj.weight, state.pe_proj.bias, predictor.event_proj.weight, predictor.event_proj.bias, predictor.state_proj.weight, predictor.state_proj.bias
+Step 00000 | Validation bpb: 3.144261 | state_mode=carry(rda)
+[rda] step    1 mode=reset doc_starts_this_step=3 E_t.norm()=[0.0000,0.0000] E_hat_next.norm()=[0.4779,0.5236] E_next.norm()=[0.0408,0.0688] dpe.norm()=[0.4728,0.5192]
+[rda] step    2 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0408,0.0688] E_hat_next.norm()=[0.5055,0.5025] E_next.norm()=[0.0587,0.0758] dpe.norm()=[0.5077,0.5196]
+[rda] step    3 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0587,0.0758] E_hat_next.norm()=[0.4854,0.5140] E_next.norm()=[0.0605,0.0832] dpe.norm()=[0.4805,0.5449]
+[rda] step    4 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0605,0.0832] E_hat_next.norm()=[0.5039,0.5103] E_next.norm()=[0.0595,0.0886] dpe.norm()=[0.5037,0.5446]
+[rda] step    5 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0595,0.0886] E_hat_next.norm()=[0.5054,0.5030] E_next.norm()=[0.0478,0.0851] dpe.norm()=[0.5041,0.5285]
+[rda] step    6 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0478,0.0851] E_hat_next.norm()=[0.4949,0.5172] E_next.norm()=[0.0518,0.0961] dpe.norm()=[0.4866,0.5669]
+[rda] step    7 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0518,0.0961] E_hat_next.norm()=[0.4941,0.5243] E_next.norm()=[0.0622,0.1186] dpe.norm()=[0.4781,0.5844]
+[rda] step    8 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0622,0.1186] E_hat_next.norm()=[0.5003,0.4964] E_next.norm()=[0.0797,0.1168] dpe.norm()=[0.4863,0.5514]
+[rda] step    9 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0797,0.1168] E_hat_next.norm()=[0.4977,0.5013] E_next.norm()=[0.0726,0.0810] dpe.norm()=[0.4847,0.5689]
+[rda] step   10 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0726,0.0810] E_hat_next.norm()=[0.5059,0.4948] E_next.norm()=[0.0725,0.0977] dpe.norm()=[0.4873,0.5411]
+[rda] step   11 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0725,0.0977] E_hat_next.norm()=[0.4936,0.4777] E_next.norm()=[0.0794,0.0983] dpe.norm()=[0.4810,0.5291]
+[rda] step   12 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0794,0.0983] E_hat_next.norm()=[0.4810,0.5101] E_next.norm()=[0.0678,0.0980] dpe.norm()=[0.4585,0.5595]
+[rda] step   13 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0678,0.0980] E_hat_next.norm()=[0.4877,0.5089] E_next.norm()=[0.0616,0.1012] dpe.norm()=[0.4736,0.5512]
+[rda] step   14 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0616,0.1012] E_hat_next.norm()=[0.4981,0.5290] E_next.norm()=[0.0620,0.1005] dpe.norm()=[0.4996,0.5683]
+[rda] step   15 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0620,0.1005] E_hat_next.norm()=[0.5167,0.5166] E_next.norm()=[0.0768,0.1060] dpe.norm()=[0.5046,0.5658]
+[rda] step   16 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0768,0.1060] E_hat_next.norm()=[0.4995,0.5494] E_next.norm()=[0.0821,0.1346] dpe.norm()=[0.4764,0.6100]
+ANSWER_LOSS step=0 SALIENT=10.396640 ORDINARY=10.389559 ln16=2.772589
+[rda] FILM step=0 to_scale.weight.abs().mean()=0.000000e+00 to_shift.weight.abs().mean()=0.000000e+00
+[rda] SAT step=0 n_dim(|E|>0.98)=0  per-dim |E|max: 0.132 0.060 0.045 0.038 0.071 0.045 0.049 0.035
+step 00000/01200 (0.00%) | loss: 10.398695 | lrm: 0.03 | dt: 1945.26ms | tok/sec: 16,845 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step   17 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0821,0.1346] E_hat_next.norm()=[0.4601,0.4720] E_next.norm()=[0.0912,0.1184] dpe.norm()=[0.4315,0.5220]
+[rda] step   18 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0912,0.1184] E_hat_next.norm()=[0.5042,0.4878] E_next.norm()=[0.0665,0.0740] dpe.norm()=[0.4780,0.5022]
+[rda] step   19 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0665,0.0740] E_hat_next.norm()=[0.5076,0.4978] E_next.norm()=[0.0663,0.0820] dpe.norm()=[0.4835,0.5133]
+[rda] step   20 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0663,0.0820] E_hat_next.norm()=[0.5161,0.5261] E_next.norm()=[0.0859,0.0827] dpe.norm()=[0.5075,0.5430]
+[rda] step   21 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0859,0.0827] E_hat_next.norm()=[0.4947,0.5232] E_next.norm()=[0.0751,0.0784] dpe.norm()=[0.4783,0.5368]
+[rda] step   22 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0751,0.0784] E_hat_next.norm()=[0.5101,0.4736] E_next.norm()=[0.0860,0.0870] dpe.norm()=[0.4955,0.4906]
+[rda] step   23 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0860,0.0870] E_hat_next.norm()=[0.5086,0.4971] E_next.norm()=[0.0678,0.1291] dpe.norm()=[0.4981,0.5041]
+[rda] step   24 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0678,0.1291] E_hat_next.norm()=[0.5219,0.4865] E_next.norm()=[0.0822,0.0883] dpe.norm()=[0.5159,0.5089]
+[rda] step   25 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0822,0.0883] E_hat_next.norm()=[0.4829,0.4951] E_next.norm()=[0.0778,0.0999] dpe.norm()=[0.4571,0.5025]
+[rda] step   26 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0778,0.0999] E_hat_next.norm()=[0.5181,0.5022] E_next.norm()=[0.0882,0.0721] dpe.norm()=[0.4969,0.5293]
+[rda] step   27 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0882,0.0721] E_hat_next.norm()=[0.4903,0.5082] E_next.norm()=[0.0716,0.0934] dpe.norm()=[0.4821,0.5343]
+[rda] step   28 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0716,0.0934] E_hat_next.norm()=[0.4765,0.5091] E_next.norm()=[0.0804,0.0906] dpe.norm()=[0.4637,0.5509]
+[rda] step   29 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0804,0.0906] E_hat_next.norm()=[0.5143,0.4984] E_next.norm()=[0.0828,0.1125] dpe.norm()=[0.5018,0.5532]
+[rda] step   30 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0828,0.1125] E_hat_next.norm()=[0.4749,0.5633] E_next.norm()=[0.0967,0.1288] dpe.norm()=[0.4590,0.5833]
+[rda] step   31 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0967,0.1288] E_hat_next.norm()=[0.5216,0.5335] E_next.norm()=[0.0901,0.1062] dpe.norm()=[0.5066,0.5510]
+[rda] step   32 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0901,0.1062] E_hat_next.norm()=[0.4857,0.4704] E_next.norm()=[0.0905,0.1122] dpe.norm()=[0.4675,0.4853]
+step 00001/01200 (0.08%) | loss: 10.391216 | lrm: 0.05 | dt: 1747.58ms | tok/sec: 18,750 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step   33 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0905,0.1122] E_hat_next.norm()=[0.5186,0.5176] E_next.norm()=[0.0882,0.1071] dpe.norm()=[0.4989,0.5250]
+[rda] step   34 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0882,0.1071] E_hat_next.norm()=[0.5281,0.4898] E_next.norm()=[0.0913,0.1077] dpe.norm()=[0.5161,0.5074]
+[rda] step   35 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0913,0.1077] E_hat_next.norm()=[0.4966,0.4805] E_next.norm()=[0.0942,0.1109] dpe.norm()=[0.4743,0.5227]
+[rda] step   36 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0942,0.1109] E_hat_next.norm()=[0.4913,0.4762] E_next.norm()=[0.0824,0.1254] dpe.norm()=[0.4863,0.4962]
+[rda] step   37 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0824,0.1254] E_hat_next.norm()=[0.4855,0.5131] E_next.norm()=[0.0690,0.1116] dpe.norm()=[0.4640,0.5424]
+[rda] step   38 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0690,0.1116] E_hat_next.norm()=[0.5163,0.5017] E_next.norm()=[0.0912,0.1119] dpe.norm()=[0.4860,0.5564]
+[rda] step   39 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0912,0.1119] E_hat_next.norm()=[0.4968,0.5009] E_next.norm()=[0.0820,0.1172] dpe.norm()=[0.4688,0.5491]
+[rda] step   40 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0820,0.1172] E_hat_next.norm()=[0.5022,0.5484] E_next.norm()=[0.0844,0.1355] dpe.norm()=[0.4856,0.6006]
+[rda] step   41 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0844,0.1355] E_hat_next.norm()=[0.4710,0.4613] E_next.norm()=[0.1046,0.1426] dpe.norm()=[0.4477,0.5229]
+[rda] step   42 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1046,0.1426] E_hat_next.norm()=[0.5157,0.4560] E_next.norm()=[0.0805,0.1680] dpe.norm()=[0.4964,0.5510]
+[rda] step   43 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0805,0.1680] E_hat_next.norm()=[0.5143,0.4748] E_next.norm()=[0.0994,0.1324] dpe.norm()=[0.4889,0.5360]
+[rda] step   44 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0994,0.1324] E_hat_next.norm()=[0.5152,0.5217] E_next.norm()=[0.0819,0.1224] dpe.norm()=[0.4904,0.5619]
+[rda] step   45 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0819,0.1224] E_hat_next.norm()=[0.5073,0.5207] E_next.norm()=[0.0942,0.1613] dpe.norm()=[0.4821,0.5863]
+[rda] step   46 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0942,0.1613] E_hat_next.norm()=[0.4974,0.5043] E_next.norm()=[0.0828,0.1367] dpe.norm()=[0.4786,0.5570]
+[rda] step   47 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0828,0.1367] E_hat_next.norm()=[0.5216,0.4890] E_next.norm()=[0.0792,0.1371] dpe.norm()=[0.4918,0.5315]
+[rda] step   48 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0792,0.1371] E_hat_next.norm()=[0.5397,0.4842] E_next.norm()=[0.0841,0.1526] dpe.norm()=[0.5269,0.5349]
+step 00002/01200 (0.17%) | loss: 10.377978 | lrm: 0.07 | dt: 1716.47ms | tok/sec: 19,090 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step   49 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0841,0.1526] E_hat_next.norm()=[0.5050,0.5413] E_next.norm()=[0.0985,0.1986] dpe.norm()=[0.4915,0.6021]
+[rda] step   50 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0985,0.1986] E_hat_next.norm()=[0.4926,0.4910] E_next.norm()=[0.1246,0.1732] dpe.norm()=[0.4738,0.5680]
+[rda] step   51 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1246,0.1732] E_hat_next.norm()=[0.5135,0.4966] E_next.norm()=[0.1090,0.1641] dpe.norm()=[0.5018,0.5486]
+[rda] step   52 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1090,0.1641] E_hat_next.norm()=[0.5034,0.4855] E_next.norm()=[0.0953,0.1625] dpe.norm()=[0.4986,0.5327]
+[rda] step   53 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0953,0.1625] E_hat_next.norm()=[0.4969,0.4985] E_next.norm()=[0.0906,0.1609] dpe.norm()=[0.4978,0.5752]
+[rda] step   54 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0906,0.1609] E_hat_next.norm()=[0.5046,0.4983] E_next.norm()=[0.0951,0.1312] dpe.norm()=[0.4997,0.5531]
+[rda] step   55 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0951,0.1312] E_hat_next.norm()=[0.4918,0.5402] E_next.norm()=[0.0972,0.1585] dpe.norm()=[0.4892,0.5708]
+[rda] step   56 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0972,0.1585] E_hat_next.norm()=[0.5132,0.5251] E_next.norm()=[0.1012,0.1692] dpe.norm()=[0.4940,0.5910]
+[rda] step   57 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1012,0.1692] E_hat_next.norm()=[0.5071,0.4947] E_next.norm()=[0.1183,0.1850] dpe.norm()=[0.4802,0.5792]
+[rda] step   58 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1183,0.1850] E_hat_next.norm()=[0.4864,0.5073] E_next.norm()=[0.1132,0.2055] dpe.norm()=[0.4637,0.5847]
+[rda] step   59 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1132,0.2055] E_hat_next.norm()=[0.4793,0.5222] E_next.norm()=[0.0990,0.1834] dpe.norm()=[0.4667,0.6165]
+[rda] step   60 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0990,0.1834] E_hat_next.norm()=[0.4716,0.5143] E_next.norm()=[0.1166,0.1826] dpe.norm()=[0.4647,0.6066]
+[rda] step   61 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1166,0.1826] E_hat_next.norm()=[0.5054,0.4707] E_next.norm()=[0.1044,0.1786] dpe.norm()=[0.4898,0.5492]
+[rda] step   62 mode=carry doc_starts_this_step=4 E_t.norm()=[0.1044,0.1786] E_hat_next.norm()=[0.5007,0.5461] E_next.norm()=[0.0895,0.1892] dpe.norm()=[0.4797,0.6227]
+[rda] step   63 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0895,0.1892] E_hat_next.norm()=[0.4926,0.5218] E_next.norm()=[0.0996,0.2129] dpe.norm()=[0.4730,0.5949]
+[rda] step   64 mode=carry doc_starts_this_step=3 E_t.norm()=[0.0996,0.2129] E_hat_next.norm()=[0.4988,0.5335] E_next.norm()=[0.1163,0.1997] dpe.norm()=[0.4745,0.6073]
+step 00003/01200 (0.25%) | loss: 10.350306 | lrm: 0.10 | dt: 1706.35ms | tok/sec: 19,203 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step   65 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1163,0.1997] E_hat_next.norm()=[0.4866,0.5027] E_next.norm()=[0.1413,0.2184] dpe.norm()=[0.4751,0.5955]
+[rda] step   66 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1413,0.2184] E_hat_next.norm()=[0.4974,0.5574] E_next.norm()=[0.1483,0.2298] dpe.norm()=[0.4878,0.6364]
+[rda] step   67 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1483,0.2298] E_hat_next.norm()=[0.4941,0.5465] E_next.norm()=[0.1407,0.2258] dpe.norm()=[0.4857,0.6031]
+[rda] step   68 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1407,0.2258] E_hat_next.norm()=[0.4975,0.5124] E_next.norm()=[0.1458,0.2433] dpe.norm()=[0.4945,0.5853]
+[rda] step   69 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1458,0.2433] E_hat_next.norm()=[0.4964,0.5213] E_next.norm()=[0.1290,0.2888] dpe.norm()=[0.4836,0.6296]
+[rda] step   70 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1290,0.2888] E_hat_next.norm()=[0.4836,0.5442] E_next.norm()=[0.1417,0.2529] dpe.norm()=[0.4777,0.6520]
+[rda] step   71 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1417,0.2529] E_hat_next.norm()=[0.4694,0.5331] E_next.norm()=[0.1522,0.2506] dpe.norm()=[0.4642,0.6493]
+[rda] step   72 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1522,0.2506] E_hat_next.norm()=[0.4910,0.5134] E_next.norm()=[0.1618,0.2766] dpe.norm()=[0.4976,0.6257]
+[rda] step   73 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1618,0.2766] E_hat_next.norm()=[0.5164,0.4954] E_next.norm()=[0.1514,0.2618] dpe.norm()=[0.5126,0.6099]
+[rda] step   74 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1514,0.2618] E_hat_next.norm()=[0.4935,0.5067] E_next.norm()=[0.1367,0.2710] dpe.norm()=[0.4865,0.6148]
+[rda] step   75 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1367,0.2710] E_hat_next.norm()=[0.5003,0.5272] E_next.norm()=[0.1343,0.2785] dpe.norm()=[0.4865,0.6406]
+[rda] step   76 mode=carry doc_starts_this_step=4 E_t.norm()=[0.1343,0.2785] E_hat_next.norm()=[0.4796,0.5217] E_next.norm()=[0.1409,0.2686] dpe.norm()=[0.4820,0.6305]
+[rda] step   77 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1409,0.2686] E_hat_next.norm()=[0.5132,0.4885] E_next.norm()=[0.1518,0.2572] dpe.norm()=[0.5204,0.5999]
+[rda] step   78 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1518,0.2572] E_hat_next.norm()=[0.4942,0.5240] E_next.norm()=[0.1467,0.2544] dpe.norm()=[0.4890,0.6328]
+[rda] step   79 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1467,0.2544] E_hat_next.norm()=[0.4851,0.5238] E_next.norm()=[0.1304,0.3011] dpe.norm()=[0.4731,0.6283]
+[rda] step   80 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1304,0.3011] E_hat_next.norm()=[0.4624,0.4817] E_next.norm()=[0.1749,0.2710] dpe.norm()=[0.4498,0.5890]
+step 00004/01200 (0.33%) | loss: 10.305957 | lrm: 0.12 | dt: 1777.91ms | tok/sec: 18,430 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step   81 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1749,0.2710] E_hat_next.norm()=[0.5059,0.5477] E_next.norm()=[0.1939,0.3132] dpe.norm()=[0.4995,0.6588]
+[rda] step   82 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1939,0.3132] E_hat_next.norm()=[0.4721,0.4895] E_next.norm()=[0.1959,0.3395] dpe.norm()=[0.4904,0.6291]
+[rda] step   83 mode=carry doc_starts_this_step=3 E_t.norm()=[0.1959,0.3395] E_hat_next.norm()=[0.4977,0.5043] E_next.norm()=[0.2139,0.3238] dpe.norm()=[0.5357,0.6236]
+[rda] step   84 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2139,0.3238] E_hat_next.norm()=[0.4651,0.5164] E_next.norm()=[0.2064,0.3284] dpe.norm()=[0.4934,0.6466]
+[rda] step   85 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2064,0.3284] E_hat_next.norm()=[0.5067,0.5063] E_next.norm()=[0.2221,0.3758] dpe.norm()=[0.5408,0.6744]
+[rda] step   86 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2221,0.3758] E_hat_next.norm()=[0.5031,0.5555] E_next.norm()=[0.2205,0.3599] dpe.norm()=[0.5453,0.7050]
+[rda] step   87 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2205,0.3599] E_hat_next.norm()=[0.4900,0.5422] E_next.norm()=[0.2033,0.3412] dpe.norm()=[0.5315,0.6558]
+[rda] step   88 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2033,0.3412] E_hat_next.norm()=[0.4973,0.5142] E_next.norm()=[0.2288,0.3581] dpe.norm()=[0.5236,0.6450]
+[rda] step   89 mode=carry doc_starts_this_step=4 E_t.norm()=[0.2288,0.3581] E_hat_next.norm()=[0.4760,0.5233] E_next.norm()=[0.2340,0.4000] dpe.norm()=[0.5099,0.6789]
+[rda] step   90 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2340,0.4000] E_hat_next.norm()=[0.4988,0.5101] E_next.norm()=[0.2174,0.4014] dpe.norm()=[0.5318,0.6648]
+[rda] step   91 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2174,0.4014] E_hat_next.norm()=[0.5136,0.5250] E_next.norm()=[0.2325,0.3755] dpe.norm()=[0.5249,0.6776]
+[rda] step   92 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2325,0.3755] E_hat_next.norm()=[0.5131,0.5172] E_next.norm()=[0.2286,0.4244] dpe.norm()=[0.5491,0.6513]
+[rda] step   93 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2286,0.4244] E_hat_next.norm()=[0.4814,0.5375] E_next.norm()=[0.2232,0.3876] dpe.norm()=[0.5141,0.6873]
+[rda] step   94 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2232,0.3876] E_hat_next.norm()=[0.4839,0.5648] E_next.norm()=[0.2212,0.3853] dpe.norm()=[0.5166,0.7239]
+[rda] step   95 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2212,0.3853] E_hat_next.norm()=[0.4967,0.5111] E_next.norm()=[0.2152,0.3631] dpe.norm()=[0.5247,0.6905]
+[rda] step   96 mode=carry doc_starts_this_step=4 E_t.norm()=[0.2152,0.3631] E_hat_next.norm()=[0.4818,0.4970] E_next.norm()=[0.2248,0.3693] dpe.norm()=[0.5166,0.6590]
+step 00005/01200 (0.42%) | loss: 10.237882 | lrm: 0.15 | dt: 1680.58ms | tok/sec: 19,498 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step   97 mode=carry doc_starts_this_step=3 E_t.norm()=[0.2248,0.3693] E_hat_next.norm()=[0.4789,0.5224] E_next.norm()=[0.3119,0.4615] dpe.norm()=[0.5691,0.7160]
+[rda] step   98 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3119,0.4615] E_hat_next.norm()=[0.4922,0.5341] E_next.norm()=[0.3122,0.5208] dpe.norm()=[0.6088,0.7581]
+[rda] step   99 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3122,0.5208] E_hat_next.norm()=[0.4969,0.5507] E_next.norm()=[0.3343,0.5319] dpe.norm()=[0.5971,0.8029]
+[rda] step  100 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3343,0.5319] E_hat_next.norm()=[0.5006,0.5784] E_next.norm()=[0.3427,0.5374] dpe.norm()=[0.5989,0.8102]
+[rda] step  101 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3427,0.5374] E_hat_next.norm()=[0.4925,0.5686] E_next.norm()=[0.3364,0.5064] dpe.norm()=[0.5952,0.7727]
+[rda] step  102 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3364,0.5064] E_hat_next.norm()=[0.4920,0.6024] E_next.norm()=[0.3164,0.4650] dpe.norm()=[0.5970,0.8076]
+[rda] step  103 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3164,0.4650] E_hat_next.norm()=[0.4734,0.5526] E_next.norm()=[0.3304,0.4696] dpe.norm()=[0.5778,0.7259]
+[rda] step  104 mode=carry doc_starts_this_step=4 E_t.norm()=[0.3304,0.4696] E_hat_next.norm()=[0.4765,0.5248] E_next.norm()=[0.3682,0.4881] dpe.norm()=[0.6137,0.7419]
+[rda] step  105 mode=carry doc_starts_this_step=4 E_t.norm()=[0.3682,0.4881] E_hat_next.norm()=[0.4683,0.5216] E_next.norm()=[0.3189,0.4985] dpe.norm()=[0.5734,0.7278]
+[rda] step  106 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3189,0.4985] E_hat_next.norm()=[0.4840,0.5072] E_next.norm()=[0.3198,0.5060] dpe.norm()=[0.5732,0.7081]
+[rda] step  107 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3198,0.5060] E_hat_next.norm()=[0.4847,0.5405] E_next.norm()=[0.3385,0.4644] dpe.norm()=[0.5940,0.7547]
+[rda] step  108 mode=carry doc_starts_this_step=4 E_t.norm()=[0.3385,0.4644] E_hat_next.norm()=[0.4883,0.4976] E_next.norm()=[0.3479,0.4808] dpe.norm()=[0.5936,0.6952]
+[rda] step  109 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3479,0.4808] E_hat_next.norm()=[0.4903,0.5241] E_next.norm()=[0.3640,0.5177] dpe.norm()=[0.6102,0.7737]
+[rda] step  110 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3640,0.5177] E_hat_next.norm()=[0.4702,0.5941] E_next.norm()=[0.3734,0.4561] dpe.norm()=[0.5796,0.7997]
+[rda] step  111 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3734,0.4561] E_hat_next.norm()=[0.4994,0.5522] E_next.norm()=[0.3568,0.5236] dpe.norm()=[0.6068,0.7450]
+[rda] step  112 mode=carry doc_starts_this_step=3 E_t.norm()=[0.3568,0.5236] E_hat_next.norm()=[0.4734,0.5270] E_next.norm()=[0.3578,0.5791] dpe.norm()=[0.5934,0.7929]
+step 00006/01200 (0.50%) | loss: 10.150589 | lrm: 0.17 | dt: 1755.51ms | tok/sec: 18,665 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step  113 mode=carry doc_starts_this_step=4 E_t.norm()=[0.3578,0.5791] E_hat_next.norm()=[0.5049,0.5609] E_next.norm()=[0.4547,0.6130] dpe.norm()=[0.6737,0.8324]
+[rda] step  114 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4547,0.6130] E_hat_next.norm()=[0.4823,0.5733] E_next.norm()=[0.4772,0.5982] dpe.norm()=[0.6843,0.8760]
+[rda] step  115 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4772,0.5982] E_hat_next.norm()=[0.5254,0.5858] E_next.norm()=[0.4597,0.6834] dpe.norm()=[0.7350,0.8925]
+[rda] step  116 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4597,0.6834] E_hat_next.norm()=[0.4883,0.5672] E_next.norm()=[0.4720,0.6922] dpe.norm()=[0.7057,0.8702]
+[rda] step  117 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4720,0.6922] E_hat_next.norm()=[0.4865,0.5661] E_next.norm()=[0.4700,0.7008] dpe.norm()=[0.7007,0.9391]
+[rda] step  118 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4700,0.7008] E_hat_next.norm()=[0.4840,0.5695] E_next.norm()=[0.5113,0.6615] dpe.norm()=[0.7267,0.9048]
+[rda] step  119 mode=carry doc_starts_this_step=3 E_t.norm()=[0.5113,0.6615] E_hat_next.norm()=[0.5192,0.5473] E_next.norm()=[0.4991,0.6484] dpe.norm()=[0.7420,0.8634]
+[rda] step  120 mode=carry doc_starts_this_step=4 E_t.norm()=[0.4991,0.6484] E_hat_next.norm()=[0.4880,0.5420] E_next.norm()=[0.4626,0.6282] dpe.norm()=[0.7170,0.8324]
+[rda] step  121 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4626,0.6282] E_hat_next.norm()=[0.5105,0.5689] E_next.norm()=[0.4776,0.7188] dpe.norm()=[0.7330,0.9042]
+[rda] step  122 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4776,0.7188] E_hat_next.norm()=[0.5163,0.5827] E_next.norm()=[0.4956,0.7291] dpe.norm()=[0.7407,0.8709]
+[rda] step  123 mode=carry doc_starts_this_step=4 E_t.norm()=[0.4956,0.7291] E_hat_next.norm()=[0.5167,0.5786] E_next.norm()=[0.5334,0.6911] dpe.norm()=[0.7516,0.8606]
+[rda] step  124 mode=carry doc_starts_this_step=3 E_t.norm()=[0.5334,0.6911] E_hat_next.norm()=[0.4918,0.5521] E_next.norm()=[0.5101,0.6845] dpe.norm()=[0.7404,0.8460]
+[rda] step  125 mode=carry doc_starts_this_step=4 E_t.norm()=[0.5101,0.6845] E_hat_next.norm()=[0.5122,0.5944] E_next.norm()=[0.4902,0.6454] dpe.norm()=[0.7631,0.9098]
+[rda] step  126 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4902,0.6454] E_hat_next.norm()=[0.5112,0.5724] E_next.norm()=[0.4940,0.6761] dpe.norm()=[0.7401,0.8699]
+[rda] step  127 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4940,0.6761] E_hat_next.norm()=[0.4801,0.5902] E_next.norm()=[0.5032,0.7850] dpe.norm()=[0.7225,0.9836]
+[rda] step  128 mode=carry doc_starts_this_step=3 E_t.norm()=[0.5032,0.7850] E_hat_next.norm()=[0.4996,0.5842] E_next.norm()=[0.4861,0.6883] dpe.norm()=[0.7422,0.9068]
+step 00007/01200 (0.58%) | loss: 10.052467 | lrm: 0.20 | dt: 1685.61ms | tok/sec: 19,439 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step  129 mode=carry doc_starts_this_step=3 E_t.norm()=[0.4861,0.6883] E_hat_next.norm()=[0.5363,0.6390] E_next.norm()=[0.6171,0.7787] dpe.norm()=[0.8436,0.9767]
+[rda] step  130 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6171,0.7787] E_hat_next.norm()=[0.5319,0.6043] E_next.norm()=[0.6422,0.8518] dpe.norm()=[0.8785,1.0541]
+[rda] step  131 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6422,0.8518] E_hat_next.norm()=[0.5490,0.6577] E_next.norm()=[0.6762,0.8747] dpe.norm()=[0.8861,1.0866]
+[rda] step  132 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6762,0.8747] E_hat_next.norm()=[0.5208,0.6382] E_next.norm()=[0.6251,0.9102] dpe.norm()=[0.8693,1.0852]
+[rda] step  133 mode=carry doc_starts_this_step=4 E_t.norm()=[0.6251,0.9102] E_hat_next.norm()=[0.5374,0.6299] E_next.norm()=[0.6608,0.8453] dpe.norm()=[0.8901,1.0297]
+[rda] step  134 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6608,0.8453] E_hat_next.norm()=[0.5113,0.5827] E_next.norm()=[0.6248,0.7898] dpe.norm()=[0.8835,1.0068]
+[rda] step  135 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6248,0.7898] E_hat_next.norm()=[0.5486,0.5956] E_next.norm()=[0.6533,0.8091] dpe.norm()=[0.9044,1.0037]
+[rda] step  136 mode=carry doc_starts_this_step=4 E_t.norm()=[0.6533,0.8091] E_hat_next.norm()=[0.5318,0.6073] E_next.norm()=[0.6644,0.8264] dpe.norm()=[0.9310,1.0062]
+[rda] step  137 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6644,0.8264] E_hat_next.norm()=[0.5242,0.5750] E_next.norm()=[0.6637,0.8457] dpe.norm()=[0.9087,1.0245]
+[rda] step  138 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6637,0.8457] E_hat_next.norm()=[0.5201,0.6332] E_next.norm()=[0.6676,0.8416] dpe.norm()=[0.8884,1.0628]
+[rda] step  139 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6676,0.8416] E_hat_next.norm()=[0.5366,0.6339] E_next.norm()=[0.6557,0.8945] dpe.norm()=[0.8764,1.0625]
+[rda] step  140 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6557,0.8945] E_hat_next.norm()=[0.5339,0.5920] E_next.norm()=[0.6753,0.9145] dpe.norm()=[0.9286,1.0242]
+[rda] step  141 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6753,0.9145] E_hat_next.norm()=[0.5074,0.6118] E_next.norm()=[0.6756,0.9025] dpe.norm()=[0.9073,1.0758]
+[rda] step  142 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6756,0.9025] E_hat_next.norm()=[0.5043,0.6141] E_next.norm()=[0.6788,0.9195] dpe.norm()=[0.8874,1.0532]
+[rda] step  143 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6788,0.9195] E_hat_next.norm()=[0.5066,0.6387] E_next.norm()=[0.6534,0.9257] dpe.norm()=[0.8835,1.0594]
+[rda] step  144 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6534,0.9257] E_hat_next.norm()=[0.5371,0.6593] E_next.norm()=[0.6711,0.8608] dpe.norm()=[0.9253,1.0597]
+step 00008/01200 (0.67%) | loss: 9.926892 | lrm: 0.23 | dt: 1743.44ms | tok/sec: 18,795 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step  145 mode=carry doc_starts_this_step=3 E_t.norm()=[0.6711,0.8608] E_hat_next.norm()=[0.5697,0.6442] E_next.norm()=[0.8080,1.0677] dpe.norm()=[1.0210,1.1634]
+[rda] step  146 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8080,1.0677] E_hat_next.norm()=[0.5529,0.6758] E_next.norm()=[0.8383,1.0158] dpe.norm()=[1.0695,1.2060]
+[rda] step  147 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8383,1.0158] E_hat_next.norm()=[0.5930,0.6554] E_next.norm()=[0.8433,0.9971] dpe.norm()=[1.1182,1.1558]
+[rda] step  148 mode=carry doc_starts_this_step=4 E_t.norm()=[0.8433,0.9971] E_hat_next.norm()=[0.6067,0.6017] E_next.norm()=[0.8660,1.0383] dpe.norm()=[1.1362,1.1690]
+[rda] step  149 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8660,1.0383] E_hat_next.norm()=[0.5670,0.6723] E_next.norm()=[0.8407,1.0729] dpe.norm()=[1.1047,1.1775]
+[rda] step  150 mode=carry doc_starts_this_step=4 E_t.norm()=[0.8407,1.0729] E_hat_next.norm()=[0.5731,0.6783] E_next.norm()=[0.8564,1.1469] dpe.norm()=[1.1195,1.2293]
+[rda] step  151 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8564,1.1469] E_hat_next.norm()=[0.5453,0.6595] E_next.norm()=[0.8926,1.0782] dpe.norm()=[1.1042,1.2528]
+[rda] step  152 mode=carry doc_starts_this_step=4 E_t.norm()=[0.8926,1.0782] E_hat_next.norm()=[0.5441,0.6739] E_next.norm()=[0.8657,1.0092] dpe.norm()=[1.0988,1.2545]
+[rda] step  153 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8657,1.0092] E_hat_next.norm()=[0.5625,0.6463] E_next.norm()=[0.8908,1.0598] dpe.norm()=[1.1104,1.2031]
+[rda] step  154 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8908,1.0598] E_hat_next.norm()=[0.5901,0.6747] E_next.norm()=[0.8756,1.0839] dpe.norm()=[1.1559,1.2060]
+[rda] step  155 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8756,1.0839] E_hat_next.norm()=[0.5713,0.7062] E_next.norm()=[0.8657,0.9930] dpe.norm()=[1.1308,1.1497]
+[rda] step  156 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8657,0.9930] E_hat_next.norm()=[0.5801,0.6493] E_next.norm()=[0.8925,0.9983] dpe.norm()=[1.1423,1.1721]
+[rda] step  157 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8925,0.9983] E_hat_next.norm()=[0.5594,0.6026] E_next.norm()=[0.8689,1.0700] dpe.norm()=[1.1232,1.1471]
+[rda] step  158 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8689,1.0700] E_hat_next.norm()=[0.5578,0.6555] E_next.norm()=[0.8733,1.0168] dpe.norm()=[1.1271,1.1707]
+[rda] step  159 mode=carry doc_starts_this_step=4 E_t.norm()=[0.8733,1.0168] E_hat_next.norm()=[0.5618,0.6618] E_next.norm()=[0.8640,0.9453] dpe.norm()=[1.1295,1.1884]
+[rda] step  160 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8640,0.9453] E_hat_next.norm()=[0.5881,0.6578] E_next.norm()=[0.8375,1.0854] dpe.norm()=[1.1377,1.2093]
+step 00009/01200 (0.75%) | loss: 9.768698 | lrm: 0.25 | dt: 1740.49ms | tok/sec: 18,826 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step  161 mode=carry doc_starts_this_step=3 E_t.norm()=[0.8375,1.0854] E_hat_next.norm()=[0.6153,0.6687] E_next.norm()=[1.0229,1.2013] dpe.norm()=[1.2410,1.2837]
+[rda] step  162 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0229,1.2013] E_hat_next.norm()=[0.6240,0.7123] E_next.norm()=[1.0703,1.2299] dpe.norm()=[1.3311,1.3313]
+[rda] step  163 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0703,1.2299] E_hat_next.norm()=[0.6132,0.7433] E_next.norm()=[1.0753,1.1402] dpe.norm()=[1.3370,1.3116]
+[rda] step  164 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0753,1.1402] E_hat_next.norm()=[0.6176,0.6833] E_next.norm()=[1.0771,1.2546] dpe.norm()=[1.3341,1.3676]
+[rda] step  165 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0771,1.2546] E_hat_next.norm()=[0.6527,0.7123] E_next.norm()=[1.1107,1.2282] dpe.norm()=[1.3922,1.3860]
+[rda] step  166 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1107,1.2282] E_hat_next.norm()=[0.6280,0.6856] E_next.norm()=[1.0788,1.1482] dpe.norm()=[1.3612,1.2995]
+[rda] step  167 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0788,1.1482] E_hat_next.norm()=[0.6429,0.6953] E_next.norm()=[1.1180,1.2067] dpe.norm()=[1.3846,1.3357]
+[rda] step  168 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1180,1.2067] E_hat_next.norm()=[0.5991,0.7148] E_next.norm()=[1.0934,1.2939] dpe.norm()=[1.3543,1.4509]
+[rda] step  169 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0934,1.2939] E_hat_next.norm()=[0.6271,0.7118] E_next.norm()=[1.1214,1.2705] dpe.norm()=[1.3791,1.4194]
+[rda] step  170 mode=carry doc_starts_this_step=4 E_t.norm()=[1.1214,1.2705] E_hat_next.norm()=[0.6197,0.6786] E_next.norm()=[1.0971,1.3167] dpe.norm()=[1.3790,1.3912]
+[rda] step  171 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0971,1.3167] E_hat_next.norm()=[0.6220,0.7505] E_next.norm()=[1.0902,1.3763] dpe.norm()=[1.3642,1.4832]
+[rda] step  172 mode=carry doc_starts_this_step=3 E_t.norm()=[1.0902,1.3763] E_hat_next.norm()=[0.6122,0.7363] E_next.norm()=[1.1101,1.2733] dpe.norm()=[1.3833,1.4329]
+[rda] step  173 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1101,1.2733] E_hat_next.norm()=[0.6520,0.7518] E_next.norm()=[1.1073,1.3051] dpe.norm()=[1.3802,1.3989]
+[rda] step  174 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1073,1.3051] E_hat_next.norm()=[0.6259,0.6957] E_next.norm()=[1.1357,1.3096] dpe.norm()=[1.3965,1.4359]
+[rda] step  175 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1357,1.3096] E_hat_next.norm()=[0.6130,0.7129] E_next.norm()=[1.1082,1.3822] dpe.norm()=[1.3755,1.4204]
+[rda] step  176 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1082,1.3822] E_hat_next.norm()=[0.6173,0.7352] E_next.norm()=[1.1398,1.3393] dpe.norm()=[1.3792,1.4428]
+step 00010/01200 (0.83%) | loss: 9.586195 | lrm: 0.28 | dt: 1755.64ms | tok/sec: 18,664 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.00m
+[rda] step  177 mode=carry doc_starts_this_step=3 E_t.norm()=[1.1398,1.3393] E_hat_next.norm()=[0.6533,0.7455] E_next.norm()=[1.3075,1.4433] dpe.norm()=[1.5477,1.5334]
+[rda] step  178 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3075,1.4433] E_hat_next.norm()=[0.7061,0.7987] E_next.norm()=[1.3406,1.5106] dpe.norm()=[1.6284,1.6431]
+[rda] step  179 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3406,1.5106] E_hat_next.norm()=[0.6859,0.7831] E_next.norm()=[1.3511,1.5497] dpe.norm()=[1.6580,1.6362]
+[rda] step  180 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3511,1.5497] E_hat_next.norm()=[0.6914,0.8036] E_next.norm()=[1.3458,1.5480] dpe.norm()=[1.6432,1.6665]
+[rda] step  181 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3458,1.5480] E_hat_next.norm()=[0.6987,0.8385] E_next.norm()=[1.3725,1.6256] dpe.norm()=[1.6613,1.6124]
+[rda] step  182 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3725,1.6256] E_hat_next.norm()=[0.7073,0.8267] E_next.norm()=[1.3852,1.6502] dpe.norm()=[1.6783,1.7506]
+[rda] step  183 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3852,1.6502] E_hat_next.norm()=[0.6969,0.8372] E_next.norm()=[1.3595,1.4749] dpe.norm()=[1.6831,1.6492]
+[rda] step  184 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3595,1.4749] E_hat_next.norm()=[0.6746,0.7987] E_next.norm()=[1.3508,1.5015] dpe.norm()=[1.6758,1.5940]
+[rda] step  185 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3508,1.5015] E_hat_next.norm()=[0.6890,0.7816] E_next.norm()=[1.3650,1.5692] dpe.norm()=[1.6388,1.6534]
+[rda] step  186 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3650,1.5692] E_hat_next.norm()=[0.6962,0.8253] E_next.norm()=[1.4065,1.5905] dpe.norm()=[1.6730,1.6480]
+[rda] step  187 mode=carry doc_starts_this_step=3 E_t.norm()=[1.4065,1.5905] E_hat_next.norm()=[0.6942,0.7785] E_next.norm()=[1.4018,1.5973] dpe.norm()=[1.7135,1.6453]
+[rda] step  188 mode=carry doc_starts_this_step=3 E_t.norm()=[1.4018,1.5973] E_hat_next.norm()=[0.6993,0.7954] E_next.norm()=[1.3899,1.5237] dpe.norm()=[1.7079,1.6674]
+[rda] step  189 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3899,1.5237] E_hat_next.norm()=[0.6852,0.7883] E_next.norm()=[1.3880,1.5609] dpe.norm()=[1.6633,1.6211]
+[rda] step  190 mode=carry doc_starts_this_step=3 E_t.norm()=[1.3880,1.5609] E_hat_next.norm()=[0.6650,0.7950] E_next.norm()=[1.3834,1.6280] dpe.norm()=[1.6594,1.6589]
+[rda] step  191 mode=carry doc_starts_this_step=4 E_t.norm()=[1.3834,1.6280] E_hat_next.norm()=[0.6917,0.7927] E_next.norm()=[1.4344,1.5751] dpe.norm()=[1.6953,1.6590]
+[rda] step  192 mode=carry doc_starts_this_step=3 E_t.norm()=[1.4344,1.5751] E_hat_next.norm()=[0.6916,0.8079] E_next.norm()=[1.4035,1.5613] dpe.norm()=[1.7028,1.6707]
+step 00011/01200 (0.92%) | loss: 9.384527 | lrm: 0.30 | dt: 1797.78ms | tok/sec: 18,226 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.03m | eta: 35.6m
+[rda] step  193 mode=carry doc_starts_this_step=3 E_t.norm()=[1.4035,1.5613] E_hat_next.norm()=[0.7657,0.8525] E_next.norm()=[1.5892,1.5368] dpe.norm()=[1.8673,1.7097]
+[rda] step  194 mode=carry doc_starts_this_step=3 E_t.norm()=[1.5892,1.5368] E_hat_next.norm()=[0.7798,0.8178] E_next.norm()=[1.6305,1.7418] dpe.norm()=[1.9329,1.7924]
+[rda] step  195 mode=carry doc_starts_this_step=4 E_t.norm()=[1.6305,1.7418] E_hat_next.norm()=[0.7571,0.8649] E_next.norm()=[1.6449,1.7877] dpe.norm()=[1.9597,1.8381]
+[rda] step  196 mode=carry doc_starts_this_step=4 E_t.norm()=[1.6449,1.7877] E_hat_next.norm()=[0.7681,0.8800] E_next.norm()=[1.6607,1.7776] dpe.norm()=[1.9756,1.8693]
+[rda] step  197 mode=carry doc_starts_this_step=3 E_t.norm()=[1.6607,1.7776] E_hat_next.norm()=[0.7827,0.8830] E_next.norm()=[1.6745,1.8135] dpe.norm()=[2.0024,1.8523]
+[rda] step  198 mode=carry doc_starts_this_step=3 E_t.norm()=[1.6745,1.8135] E_hat_next.norm()=[0.7530,0.8672] E_next.norm()=[1.6614,1.7337] dpe.norm()=[1.9925,1.8897]
+[rda] step  199 mode=carry doc_starts_this_step=3 E_t.norm()=[1.6614,1.7337] E_hat_next.norm()=[0.7623,0.8756] E_next.norm()=[1.6667,1.6660] dpe.norm()=[1.9839,1.8793]
+[rda] step  200 mode=carry doc_starts_this_step=3 E_t.norm()=[1.6667,1.6660] E_hat_next.norm()=[0.7670,0.8407] E_next.norm()=[1.6690,1.7200] dpe.norm()=[1.9959,1.8109]
+step 00012/01200 (1.00%) | loss: 9.152360 | lrm: 0.33 | dt: 1754.12ms | tok/sec: 18,680 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.06m | eta: 35.2m
+step 00013/01200 (1.08%) | loss: 8.923414 | lrm: 0.35 | dt: 1732.29ms | tok/sec: 18,915 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 1 | total time: 0.09m | eta: 34.8m
+step 00014/01200 (1.17%) | loss: 8.674735 | lrm: 0.38 | dt: 1862.37ms | tok/sec: 17,594 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 2 | total time: 0.12m | eta: 35.3m
+step 00015/01200 (1.25%) | loss: 8.404051 | lrm: 0.40 | dt: 1804.88ms | tok/sec: 18,155 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 2 | total time: 0.15m | eta: 35.4m
+step 00016/01200 (1.33%) | loss: 8.158610 | lrm: 0.42 | dt: 1837.89ms | tok/sec: 17,829 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 2 | total time: 0.18m | eta: 35.5m
+step 00017/01200 (1.42%) | loss: 7.934204 | lrm: 0.45 | dt: 1793.15ms | tok/sec: 18,273 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 2 | total time: 0.21m | eta: 35.4m
+step 00018/01200 (1.50%) | loss: 7.691336 | lrm: 0.47 | dt: 1794.46ms | tok/sec: 18,260 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 2 | total time: 0.24m | eta: 35.4m
+step 00019/01200 (1.58%) | loss: 7.428018 | lrm: 0.50 | dt: 1695.82ms | tok/sec: 19,322 | bf16_mfu: 0.00 | epoch: 1 pq: 0 rg: 2 | total time: 0.27m | eta: 35.2m

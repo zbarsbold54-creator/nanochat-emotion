@@ -556,6 +556,18 @@ class RDAStateModule(nn.Module):
         weighted = torch.cumsum(write / retained, dim=1)
         states = retained * (E_start.to(c.dtype).unsqueeze(1) + weighted)
         states = states.clamp(-1.0, 1.0)
+        # RECORDER (diag only): save first non-finite before raising
+        max_abs = states.abs().max()
+        if not torch.isfinite(max_abs) or max_abs > 1.0 + 1e-6:
+            import torch, os
+            dump = {
+                'step': os.environ.get('DIAG_STEP','?'),
+                'E_next_shape': states.shape,
+                'E_next_nonfinite': int((~torch.isfinite(states)).sum().item()),
+                'max_abs': float(max_abs) if torch.isfinite(max_abs) else float('nan'),
+            }
+            torch.save(dump, 'diag/an_dump.pt')
+            print(f"[DIAG RECORDER] non-finite E_next at step={dump['step']} max_abs={max_abs}")
         assert states.abs().max() <= 1.0 + 1e-6, (
             f"vectorized gated write escaped [-1, 1]: max|E_next|={states.abs().max()}"
         )
