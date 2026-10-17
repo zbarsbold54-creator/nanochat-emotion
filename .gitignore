@@ -12,9 +12,42 @@ logs/
 eval/eval_anomaly_set.jsonl
 eval/recall_comparison.json
 
-# Local run driver. Regenerated per sweep and specific to one machine's GPU
-# timing, so it is a working script rather than source.
+# Local run drivers. Regenerated per sweep and specific to one machine's GPU
+# timing, so they are working scripts rather than source.
 run_sweep.ps1
+
+# Model checkpoints and dataset files
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.gguf
+*.bin
+*.dll
+
+# Virtual environments
+venv/
+.venv/
+
+# Result and log directories to exclude (with exception for pe_1000 files)
+lm_pilot/
+lm_pilot_smoke/
+recall-A-nomask-s43-w20/
+logs/
+*.log
+*.err
+*.pid
+
+# Force-added logs exception: keep pe_1000.json and pe_1000.txt
+!logs/pe_1000.json
+!logs/pe_1000.txt
+
+# Environment and IDE junk
+.env*
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
 
 # Secrets
 .env
