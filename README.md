@@ -1,5 +1,8 @@
 # RDA — Regulatory Drive Architecture
 
+Status: paper in paper/ is a draft with unverified claims, see paper/OPEN_ITEMS.md;
+results are toy-scale and mostly single-config; limits in LIMITATIONS.md.
+
 An experimental extension of [nanochat](https://github.com/karpathy/nanochat) that gives a
 small language model a persistent internal state built from a handful of primitive
 **regulatory drives**, and conditions the transformer on it.

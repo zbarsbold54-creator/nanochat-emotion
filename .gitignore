@@ -56,6 +56,11 @@ desktop.ini
 CLAUDE.md
 wandb/
 
+# Backup and temp files
+*.bak*
+*.tmp*
+*.pre-promote-*
+
 # Obsidian (the research/ folder is edited as an Obsidian vault). The config
 # and workspace state are per-machine and per-user -- they record window
 # positions, pane layout and plugin choices, which are noise in a repo and
