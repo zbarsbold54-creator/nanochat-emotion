@@ -1,0 +1,12 @@
+--- a/nanochat/rda.py
++++ b/nanochat/rda.py
+@@ -548,6 +548,8 @@ class RDAStateModule(nn.Module):
+         c = torch.tanh(content_seq)
+         g = gate_seq.to(c.dtype)
+         # The write rates are sigmoid-bounded ...
++        # MINIMAL FIX (case B): guard against non-finite inputs to recurrence
++        content_seq = torch.nan_to_num(content_seq, nan=0.0, posinf=1.0, neginf=-1.0)
++        gate_seq = torch.nan_to_num(gate_seq, nan=0.0, posinf=1.0, neginf=-1.0)
+         q = 1.0 - g
+         write = g * c
+         retained = torch.cumprod(q, dim=1)

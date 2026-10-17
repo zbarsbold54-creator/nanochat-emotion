@@ -1,0 +1,681 @@
+commit ca5d85a8f7618a3c44abf39f14761f72b1b97f57
+Author:     zbarsbold54-creator <zbarsbold54@gmail.com>
+AuthorDate: Thu Oct 15 18:16:50 2026 +0800
+Commit:     zbarsbold54-creator <zbarsbold54@gmail.com>
+CommitDate: Thu Oct 15 18:16:50 2026 +0800
+
+    Add opt-in gated RDA write mechanism
+
+diff --git a/mech_diff.patch b/mech_diff.patch
+new file mode 100644
+index 0000000..abde55b
+--- /dev/null
++++ b/mech_diff.patch
+@@ -0,0 +1,201 @@
++diff --git a/nanochat/gpt.py b/nanochat/gpt.py
++index 2a19647..c255211 100644
++--- a/nanochat/gpt.py
+++++ b/nanochat/gpt.py
++@@ -472,7 +472,8 @@ class GPT(nn.Module):
++             group["initial_lr"] = group["lr"]
++         return optimizer
++ 
++-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False):
+++    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False,
+++                return_early_hidden=False):
++         """
++         return_hidden=False (the default, used everywhere else): the return value
++         and all numerics are exactly as before.
++@@ -540,6 +541,7 @@ class GPT(nn.Module):
++         # `x` here is the pre-LM-head hidden state, i.e. exactly the signal the
++         # RDA module consumes. Capture it BEFORE the head when asked.
++         hidden = x if return_hidden else None
+++        early_hidden = x_backout
++ 
++         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
++         logits = self.lm_head(x) # (B, T, padded_vocab_size) <- very big tensor, large amount of memory
++@@ -551,9 +553,13 @@ class GPT(nn.Module):
++             # training: given the targets, compute and return the loss
++             # TODO experiment with chunked cross-entropy?
++             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
+++            if return_early_hidden:
+++                return loss, hidden, early_hidden
++             return (loss, hidden) if return_hidden else loss
++         else:
++             # inference: just return the logits directly
+++            if return_early_hidden:
+++                return logits, hidden, early_hidden
++             return (logits, hidden) if return_hidden else logits
++ 
++     @torch.inference_mode()
++diff --git a/nanochat/rda.py b/nanochat/rda.py
++index 0508267..36de948 100644
++--- a/nanochat/rda.py
+++++ b/nanochat/rda.py
++@@ -235,7 +235,7 @@ class RDAStateModule(nn.Module):
++             out = out.to(dtype)
++         return out.unsqueeze(0).expand(batch_size, -1).contiguous()
++ 
++-    def update(self, E_t, hidden_state, prediction_error) -> torch.Tensor:
+++    def update(self, E_t, hidden_state, prediction_error, content=None) -> torch.Tensor:
++         """Advance the state by one step (GATED / convex-combination rule).
++ 
++             E_next = decay * E_t + (1 - decay) * tanh(event_effect + pe_effect)
++@@ -327,7 +327,10 @@ class RDAStateModule(nn.Module):
++         ev = self.event_proj(self.h_norm(hidden_state))
++         ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
++         event_term = self.event_drive_scale * ev
++-        drive = torch.tanh(event_term + self.pe_proj(pe_scaled))
+++        drive_input = event_term + self.pe_proj(pe_scaled)
+++        if content is not None:
+++            drive_input = drive_input + content.to(drive_input.dtype)
+++        drive = torch.tanh(drive_input)
++         E_prev = E_t.to(drive.dtype)
++         # Clamp the incoming state defensively so float drift can never push the
++         # convex combination outside [-1, 1] and break the bound.
++@@ -348,7 +351,7 @@ class RDAStateModule(nn.Module):
++         return E_next
++ 
++     # -- vectorized recurrence ---------------------------------------------
++-    def drive_seq(self, hidden_seq, prediction_error_seq):
+++    def drive_seq(self, hidden_seq, prediction_error_seq, content=None):
++         """Per-position drive for a whole sequence, in one shot.
++ 
++         The vectorized twin of the body of update(): the same arithmetic, the
++@@ -385,7 +388,10 @@ class RDAStateModule(nn.Module):
++         # every verification test would be measuring two different models.
++         ev = ev / ev.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
++         event_term = self.event_drive_scale * ev
++-        return torch.tanh(event_term + self.pe_proj(pe / self.pe_reference_scale))
+++        drive_input = event_term + self.pe_proj(pe / self.pe_reference_scale)
+++        if content is not None:
+++            drive_input = drive_input + content.to(drive_input.dtype)
+++        return torch.tanh(drive_input)
++ 
++     @staticmethod
++     def _max_safe_T(decay, dtype):
++@@ -744,7 +750,8 @@ class GPTWithRDA(nn.Module):
++ 
++     def __init__(self, base_model, n_drives: int = N_DRIVES, decay=0.95,
++                  debug_steps: int = 200, check_leakage: bool = True,
++-                 const_state: bool = False, const_state_seed: int = 0):
+++                 const_state: bool = False, const_state_seed: int = 0,
+++                 mechanism: bool = False):
++         super().__init__()
++         self.base = base_model
++         d_model = base_model.config.n_embd
++@@ -752,6 +759,8 @@ class GPTWithRDA(nn.Module):
++         self.n_drives = n_drives
++         self.state = RDAStateModule(d_model, n_drives=n_drives, decay=decay)
++         self.predictor = RDAPredictor(d_model, n_drives=n_drives)
+++        self.content_proj = (nn.Linear(d_model, n_drives, bias=False)
+++                             if mechanism else None)
++         self.debug_steps = debug_steps
++         self.check_leakage = check_leakage
++         # CONTROL ARM C. When true, the tensor handed to FiLM is a learned
++@@ -985,10 +994,16 @@ class GPTWithRDA(nn.Module):
++ 
++         Returns a dict including "E_next" for the caller to carry forward.
++         """
++-        loss, hidden = self.base.forward(
+++        base_out = self.base.forward(
++             idx, targets, kv_cache=kv_cache,
++             loss_reduction=loss_reduction, return_hidden=True,
+++            return_early_hidden=self.content_proj is not None,
++         )
+++        if self.content_proj is not None:
+++            loss, hidden, early_hidden = base_out
+++        else:
+++            loss, hidden = base_out
+++            early_hidden = None
++ 
++         # The two temporal slices. Different positions => different tensors.
++         pre_outcome_hidden = hidden[:, :-1, :]   # (B, T-1, d_model)
++@@ -1070,7 +1085,10 @@ class GPTWithRDA(nn.Module):
++         # which is exactly the pre-update state the loop used.
++         L = pre_outcome_hidden.size(1)
++         if L > 0:
++-            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq)
+++            content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
+++                               self.content_proj.weight.dtype))
+++                           if self.content_proj is not None else None)
+++            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
++             E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
++             # E_t entering the predictor at each position, shifted by one.
++             E_in = torch.cat([E_start.unsqueeze(1), E_next_seq[:, :-1, :]], dim=1)
++@@ -1094,7 +1112,12 @@ class GPTWithRDA(nn.Module):
++             # FiLM still uses E_start (the state BEFORE this update), so the
++             # token just decoded is never modulated by its own update.
++             h_new = hidden[:, 0, :]                    # (B, d_model)
++-            E_next = self.state.update(E_t, h_new, torch.zeros(B, device=device, dtype=E_t.dtype))
+++            content = (self.content_proj(early_hidden[:, 0, :].to(
+++                            self.content_proj.weight.dtype))
+++                       if self.content_proj is not None else None)
+++            E_next = self.state.update(E_t, h_new,
+++                                       torch.zeros(B, device=device, dtype=E_t.dtype),
+++                                       content=content)
++             E_next_seq = E_next.new_zeros(B, 0, self.n_drives)
++             E_hat_seq = E_next_seq
++             dpe = E_next_seq
++diff --git a/scripts/base_train.py b/scripts/base_train.py
++index 84b544b..05803d7 100644
++--- a/scripts/base_train.py
+++++ b/scripts/base_train.py
++@@ -120,6 +120,10 @@ parser.add_argument("--rda-const-state", action="store_true",
++                          "per-position state. FiLM then carries no text-dependent "
++                          "and no position-dependent information. Requires --rda; "
++                          "has NO effect without it. Default OFF.")
+++parser.add_argument("--rda-mech", action="store_true",
+++                    help="add a learned early-hidden-state content write into the RDA drive")
+++parser.add_argument("--rda-mech-const", action="store_true",
+++                    help="capacity-matched constant-state control for --rda-mech")
++ parser.add_argument("--rda-debug-steps", type=int, default=200,
++                     help="number of steps to log E_t / E_hat_next / E_next / dpe norms")
++ parser.add_argument("--rda-drive-wd", type=float, default=0.01,
++@@ -135,6 +139,12 @@ parser.add_argument("--primal-debug-steps", dest="rda_debug_steps", type=int,
++ parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
++                     default=argparse.SUPPRESS, help=argparse.SUPPRESS)
++ args = parser.parse_args()
+++if args.rda_mech:
+++    args.rda = True
+++if args.rda_mech_const:
+++    args.rda_mech = True
+++    args.rda = True
+++    args.rda_const_state = True
++ if args.segment_len < 0:
++     parser.error("--segment-len must be 0 or a positive integer")
++ if not 0.0 <= args.synthetic_recall_frac <= 1.0:
++@@ -642,7 +652,8 @@ if rda_active:
++     rda_model = GPTWithRDA(orig_model, debug_steps=args.rda_debug_steps,
++                            const_state=args.rda_const_state,
++                            const_state_seed=args.seed,
++-                           decay=args.rda_decays if args.rda_decays is not None else 0.95)
+++                           decay=args.rda_decays if args.rda_decays is not None else 0.95,
+++                           mechanism=args.rda_mech)
++     rda_model = rda_model.to(device)
++     model = rda_model
++     if resuming:
++@@ -740,6 +751,8 @@ if rda_active:
++     _drive_matrix = (list(rda_model.state.event_proj.parameters())
++                      + list(rda_model.state.pe_proj.parameters())
++                      + list(rda_model.state.h_norm.parameters()))
+++    if rda_model.content_proj is not None:
+++        _drive_matrix += list(rda_model.content_proj.parameters())
++ 
++     _dmodel_lr_scale = (model_config_kwargs["n_embd"] / 768) ** -0.5
++     # NOTE: the training loop rescales every group as
++@@ -879,6 +892,8 @@ if rda_active:
++         _grad_free = _grad_free | {id(p) for p in rda_model.state.event_proj.parameters()} \
++                                    | {id(p) for p in rda_model.state.pe_proj.parameters()} \
++                                    | {id(p) for p in rda_model.state.h_norm.parameters()}
+++        if rda_model.content_proj is not None:
+++            _grad_free = _grad_free | {id(p) for p in rda_model.content_proj.parameters()}
++     for _g in optimizer.param_groups:
++         if any(id(p) in _grad_free for p in _g["params"]):
++             _g["grad_free"] = True
+diff --git a/nanochat/rda.py b/nanochat/rda.py
+index 36de948..e8a7bca 100644
+--- a/nanochat/rda.py
++++ b/nanochat/rda.py
+@@ -530,6 +530,37 @@ class RDAStateModule(nn.Module):
+         )
+         return E
+ 
++    def gated_update(self, E_t, content, gate):
++        """Advance the bounded gated-write recurrence for one position."""
++        E_prev = torch.clamp(E_t.to(content.dtype), -1.0, 1.0)
++        c = torch.tanh(content)
++        g = gate.to(c.dtype)
++        E_next = (1.0 - g) * E_prev + g * c
++        assert E_next.abs().max() <= 1.0 + 1e-6, (
++            f"gated write escaped [-1, 1]: max|E_next|={E_next.abs().max()}"
++        )
++        return E_next
++
++    def gated_update_seq(self, E_start, content_seq, gate_seq):
++        """Vectorized gated recurrence, with the token path as its oracle."""
++        if content_seq.size(1) == 0:
++            return E_start.new_empty(E_start.size(0), 0, E_start.size(1))
++        c = torch.tanh(content_seq)
++        g = gate_seq.to(c.dtype)
++        # The write rates are sigmoid-bounded and the sequence is at most a
++        # training row, so fp32 prefix products are sufficient and keep this
++        # path close to the existing fp32 drive kernels on CPU.
++        q = 1.0 - g
++        write = g * c
++        retained = torch.cumprod(q, dim=1)
++        weighted = torch.cumsum(write / retained, dim=1)
++        states = retained * (E_start.to(c.dtype).unsqueeze(1) + weighted)
++        states = states.clamp(-1.0, 1.0)
++        assert states.abs().max() <= 1.0 + 1e-6, (
++            f"vectorized gated write escaped [-1, 1]: max|E_next|={states.abs().max()}"
++        )
++        return states
++
+     def _update_seq_chunked(self, E_start, drive, limit):
+         """update_seq() for L > limit, split into segments of `limit` steps.
+ 
+@@ -751,7 +782,7 @@ class GPTWithRDA(nn.Module):
+     def __init__(self, base_model, n_drives: int = N_DRIVES, decay=0.95,
+                  debug_steps: int = 200, check_leakage: bool = True,
+                  const_state: bool = False, const_state_seed: int = 0,
+-                 mechanism: bool = False):
++                 mechanism: bool = False, gated_write: bool = False):
+         super().__init__()
+         self.base = base_model
+         d_model = base_model.config.n_embd
+@@ -759,8 +790,17 @@ class GPTWithRDA(nn.Module):
+         self.n_drives = n_drives
+         self.state = RDAStateModule(d_model, n_drives=n_drives, decay=decay)
+         self.predictor = RDAPredictor(d_model, n_drives=n_drives)
++        self.gated_write = bool(gated_write)
+         self.content_proj = (nn.Linear(d_model, n_drives, bias=False)
+-                             if mechanism else None)
++                             if (mechanism or self.gated_write) else None)
++        self.gate_proj = None
++        if self.gated_write:
++            self.gate_proj = nn.Linear(d_model, n_drives, bias=False)
++            nn.init.normal_(self.content_proj.weight, mean=0.0,
++                            std=0.5 / math.sqrt(d_model))
++            nn.init.normal_(self.gate_proj.weight, mean=0.0, std=1e-3)
++            self.register_buffer("gate_bias", torch.linspace(
++                -5.0, -9.0, n_drives, dtype=torch.float32))
+         self.debug_steps = debug_steps
+         self.check_leakage = check_leakage
+         # CONTROL ARM C. When true, the tensor handed to FiLM is a learned
+@@ -805,6 +845,14 @@ class GPTWithRDA(nn.Module):
+         # step, so T=1 decoding continues the same recurrence.
+         self.last_state = None
+ 
++    def _gated_terms(self, early_hidden):
++        """RMS-normalized early hidden to content and write rate."""
++        h = early_hidden.to(self.content_proj.weight.dtype)
++        h = h / h.pow(2).mean(dim=-1, keepdim=True).add(1e-6).sqrt()
++        content = self.content_proj(h)
++        gate = torch.sigmoid(self.gate_proj(h) + self.gate_bias.to(h.dtype))
++        return content, gate
++
+     # -- reference implementation (sequential) ------------------------------
+     def _update_loop_reference(self, E_t, pre_outcome_hidden, pe_seq):
+         """REFERENCE ONLY: the original sequential recurrence, kept verbatim.
+@@ -1085,11 +1133,17 @@ class GPTWithRDA(nn.Module):
+         # which is exactly the pre-update state the loop used.
+         L = pre_outcome_hidden.size(1)
+         if L > 0:
+-            content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
+-                               self.content_proj.weight.dtype))
+-                           if self.content_proj is not None else None)
+-            drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
+-            E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
++            if self.gated_write:
++                content_seq, gate_seq = self._gated_terms(early_hidden[:, :-1, :])
++                E_next_seq = self.state.gated_update_seq(
++                    E_start, content_seq, gate_seq)
++                drive = torch.tanh(content_seq)
++            else:
++                content_seq = (self.content_proj(early_hidden[:, :-1, :].to(
++                                   self.content_proj.weight.dtype))
++                               if self.content_proj is not None else None)
++                drive = self.state.drive_seq(pre_outcome_hidden, pe_seq, content_seq)
++                E_next_seq = self.state.update_seq(E_start, drive)  # (B, T-1, n_drives)
+             # E_t entering the predictor at each position, shifted by one.
+             E_in = torch.cat([E_start.unsqueeze(1), E_next_seq[:, :-1, :]], dim=1)
+             E_hat_seq = self.predictor.predict_seq(E_in, pre_outcome_hidden)
+@@ -1112,12 +1166,16 @@ class GPTWithRDA(nn.Module):
+             # FiLM still uses E_start (the state BEFORE this update), so the
+             # token just decoded is never modulated by its own update.
+             h_new = hidden[:, 0, :]                    # (B, d_model)
+-            content = (self.content_proj(early_hidden[:, 0, :].to(
+-                            self.content_proj.weight.dtype))
+-                       if self.content_proj is not None else None)
+-            E_next = self.state.update(E_t, h_new,
+-                                       torch.zeros(B, device=device, dtype=E_t.dtype),
+-                                       content=content)
++            if self.gated_write:
++                content, gate = self._gated_terms(early_hidden[:, 0, :])
++                E_next = self.state.gated_update(E_t, content, gate)
++            else:
++                content = (self.content_proj(early_hidden[:, 0, :].to(
++                                self.content_proj.weight.dtype))
++                           if self.content_proj is not None else None)
++                E_next = self.state.update(E_t, h_new,
++                                           torch.zeros(B, device=device, dtype=E_t.dtype),
++                                           content=content)
+             E_next_seq = E_next.new_zeros(B, 0, self.n_drives)
+             E_hat_seq = E_next_seq
+             dpe = E_next_seq
+diff --git a/run_followup.ps1 b/run_followup.ps1
+new file mode 100644
+index 0000000..2b1c705
+--- /dev/null
++++ b/run_followup.ps1
+@@ -0,0 +1,67 @@
++param([ValidateSet('MECH_GATED','POSITIVE_CONTROL_LONG')][string]$JobMode = 'MECH_GATED')
++$ErrorActionPreference = 'Stop'
++$ProgressPreference = 'SilentlyContinue'
++
++$root = 'C:\AI\nanochat_mech'
++$main = 'C:\AI\nanochat'
++$trainRoot = if ($JobMode -eq 'MECH_GATED') { $root } else { $main }
++$python = Join-Path $trainRoot '.venv\Scripts\python.exe'
++$statusPath = 'C:\AI\nanochat\STATUS_followup.md'
++$lockPath = Join-Path $root 'run_followup.pid'
++$logPath = Join-Path $root 'run_followup.log'
++$maxResumes = 3
++Set-Location -LiteralPath $trainRoot
++$env:NANOCHAT_DATASET = 'fineweb-edu'; $env:PYTHONIOENCODING = 'utf-8'; $env:PYTHONUTF8 = '1'; $env:PYTHONUNBUFFERED = '1'
++
++function Write-Status([string]$sentence, [string]$job, [string]$progress, [string]$eta, [string]$errorText, [string]$decision) {
++    $tmp = "$statusPath.tmp.$PID"
++    $body = @($sentence,"job: $job","progress: $progress","ETA: $eta","last error: $errorText","decision inputs: $decision") -join "`r`n"
++    [IO.File]::WriteAllText($tmp, $body + "`r`n", [Text.UTF8Encoding]::new($false)); Move-Item -LiteralPath $tmp -Destination $statusPath -Force
++}
++function Add-LogLines([string[]]$lines) {
++    if ($lines.Count -eq 0) { return }
++    $s=[IO.File]::Open($logPath,[IO.FileMode]::Append,[IO.FileAccess]::Write,[IO.FileShare]::ReadWrite)
++    try {$w=[IO.StreamWriter]::new($s,[Text.UTF8Encoding]::new($false));foreach($l in $lines){$w.WriteLine($l)};$w.Flush();$w.Dispose()}finally{$s.Dispose()}
++}
++function Get-LatestCompleteCheckpoint([string]$dir) {
++    $cand=Get-ChildItem $dir -Filter 'model_*.pt' -File -ErrorAction SilentlyContinue | ForEach-Object {if($_.Name -match '^model_(\d+)\.pt$'){[int]$Matches[1]}} | Sort-Object -Descending
++    foreach($step in $cand){$s='{0:D6}' -f $step;$need=@("model_$s.pt","meta_$s.json","optim_${s}_rank0.pt","rng_${s}_rank0.pt");if(@($need|Where-Object{-not(Test-Path(Join-Path $dir $_))}).Count){continue};try{if([int](Get-Content(Join-Path $dir "meta_$s.json") -Raw|ConvertFrom-Json).step -eq $step){return $step}}catch{}}
++    return $null
++}
++function Run-Train([string]$label,[string]$jobDir,[string[]]$baseArgs,[int]$killAfterSeconds=0) {
++    $resume=Get-LatestCompleteCheckpoint $jobDir;$exit=-1;$resumeCount=0
++    for($attempt=1;$attempt -le ($maxResumes+1) -and $exit -ne 0;$attempt++){
++        $args=@($baseArgs);if($null -ne $resume){$args+="--resume-from-step=$resume"};$out=Join-Path $jobDir "train_$attempt.stdout.log";$err=Join-Path $jobDir "train_$attempt.stderr.log"
++        Add-LogLines @("TRAIN_START label=$label attempt=$attempt resume_step=$(if($null -eq $resume){'fresh'}else{$resume})");Write-Status "Follow-up training is running." $label "attempt $attempt" "unknown" "" "resume=$resume"
++        $p=Start-Process $python -ArgumentList ($args -join ' ') -WorkingDirectory $trainRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru;$t0=Get-Date;$lastLen=0;$lastGrowth=Get-Date;$lastCkpt=Get-Date
++        while(-not $p.HasExited){Start-Sleep 5;$p.Refresh();if(Test-Path $out){$len=(Get-Item $out).Length;if($len -ne $lastLen){$lastLen=$len;$lastGrowth=Get-Date}};$latest=Get-LatestCompleteCheckpoint $jobDir;if($null -ne $latest){$lastCkpt=Get-Date};if($killAfterSeconds -gt 0 -and ((Get-Date)-$t0).TotalSeconds -ge $killAfterSeconds){Stop-Process -Id $p.Id -Force;Add-LogLines @("SMOKE_KILL pid=$($p.Id)");break};if(((Get-Date)-$lastGrowth).TotalMinutes -ge 30 -and ((Get-Date)-$lastCkpt).TotalMinutes -ge 45){Stop-Process -Id $p.Id -Force;Add-LogLines @("WATCHDOG_KILL pid=$($p.Id)");break}}
++        $p.Refresh();$exit=$p.ExitCode;if(Test-Path $out){Add-LogLines @(Get-Content $out -Encoding UTF8)};if(Test-Path $err){Add-LogLines @(Get-Content $err -Encoding UTF8)};Add-LogLines @("TRAIN_END label=$label attempt=$attempt exit=$exit");if($exit -eq 0){break};$resume=Get-LatestCompleteCheckpoint $jobDir;if($null -eq $resume -or $resumeCount -ge $maxResumes){throw "Training $label failed exit=$exit checkpoint=$resume"};$resumeCount++
++    }
++    if($exit -ne 0){throw "Training $label failed exit=$exit"};return (Get-LatestCompleteCheckpoint $jobDir)
++}
++function Eval-Job([string]$label,[string]$jobDir,[int]$step,[int]$seed) {
++    $wrap=Join-Path $jobDir 'eval_nomask_wrapper.py'
++    @'
++import sys
++sys.path.insert(0, r"C:\AI\nanochat")
++from diagnostics import recall_models
++real = recall_models.load_model
++def load_model(checkpoint_dir, step, device, seed, segment_len=128, decay_override=None):
++    return real(checkpoint_dir, step, device, seed, segment_len=0, decay_override=decay_override)
++import diagnostics.eval_recall as e
++e.load_model = load_model
++e.main()
++'@ | Set-Content $wrap -Encoding UTF8
++    $out=Join-Path $jobDir 'eval.stdout.log';$err=Join-Path $jobDir 'eval.stderr.log';$result=Join-Path $jobDir 'eval_result.txt';$args=@($wrap,'--checkpoint-dir',$jobDir,'--step',$step,'--device-batch-size','2','--n-rows','8192','--seed',$seed,'--eval-seed-base','3000000000','--allow-cross-above-0.09')
++    $p=Start-Process $python -ArgumentList ($args -join ' ') -WorkingDirectory $trainRoot -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -Wait
++    $text=[IO.File]::ReadAllText($out,[Text.Encoding]::UTF8)+"`r`n===== STDERR =====`r`n"+[IO.File]::ReadAllText($err,[Text.Encoding]::UTF8);[IO.File]::WriteAllText($result,$text,[Text.UTF8Encoding]::new($false));Add-LogLines @("EVAL_END label=$label exit=$($p.ExitCode) result=$result");if($p.ExitCode -ne 0){throw "Evaluation $label failed exit=$($p.ExitCode)"}
++}
++
++$lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
++try {
++    $lock.SetLength(0);$w=[IO.StreamWriter]::new($lock,[Text.UTF8Encoding]::new($false),1024,$true);$w.WriteLine($PID);$w.Flush();$w.Dispose();Add-LogLines @("RUN_START mode=$JobMode pid=$PID");Write-Status "Follow-up job has started." $JobMode "preparing" "unknown" "" "no mechanism test launched"
++    if($JobMode -eq 'MECH_GATED'){$smoke=Join-Path $root 'followup-smoke-gated';New-Item -ItemType Directory -Force $smoke|Out-Null;$smokeArgs=@('-m','scripts.base_train','--model-tag',$smoke,'--seed','43','--depth=2','--aspect-ratio=32','--head-dim=32','--max-seq-len=128','--window-pattern=L','--device-batch-size=1','--total-batch-size=128','--num-iterations=20','--save-every=10','--eval-every=-1','--core-metric-every=-1','--sample-every=-1','--rda','--rda-gated-write');Run-Train 'smoke' $smoke $smokeArgs 15|Out-Null}
++    $names=if($JobMode -eq 'MECH_GATED'){@('followup-gated-M-s43-w20','followup-gated-M-const-s43-w20')}else{@('recall-A-nomask-long-s43-w20')}
++    foreach($name in $names){$dir=Join-Path $trainRoot $name;New-Item -ItemType Directory -Force $dir|Out-Null;$iters=if($JobMode -eq 'MECH_GATED'){'1200'}else{'3600'};$args=@('-m','scripts.base_train','--model-tag',$dir,'--seed','43','--depth=8','--aspect-ratio=96','--head-dim=128','--max-seq-len=1024','--window-pattern=L','--device-batch-size=2','--total-batch-size=32768',"--num-iterations=$iters",'--eval-every=300','--eval-tokens=524288','--core-metric-every=-1','--sample-every=-1','--synthetic-recall-frac=0.5','--recall-answer-weight=20');if($JobMode -eq 'MECH_GATED'){$args+='--segment-len=128';$args+='--rda';$args+='--rda-gated-write';if($name -like '*const*'){$args+='--rda-const-state'}};Run-Train $name $dir $args|Out-Null;Eval-Job $name $dir ([int]$iters) 43}
++    Write-Status "Follow-up job completed." $JobMode "complete" "none" "" "eval_result.txt files saved before logging"
++}catch{Add-LogLines @("RUN_FAIL $($_.Exception.Message)");Write-Status "Follow-up job stopped with an error." $JobMode "failed" "none" $_.Exception.Message "no further GPU job";throw}finally{$lock.Dispose()}
+diff --git a/scripts/base_train.py b/scripts/base_train.py
+index 05803d7..e792985 100644
+--- a/scripts/base_train.py
++++ b/scripts/base_train.py
+@@ -122,6 +122,8 @@ parser.add_argument("--rda-const-state", action="store_true",
+                          "has NO effect without it. Default OFF.")
+ parser.add_argument("--rda-mech", action="store_true",
+                     help="add a learned early-hidden-state content write into the RDA drive")
++parser.add_argument("--rda-gated-write", action="store_true",
++                    help="replace the decay/event/PE write with bounded gated early-hidden writes")
+ parser.add_argument("--rda-mech-const", action="store_true",
+                     help="capacity-matched constant-state control for --rda-mech")
+ parser.add_argument("--rda-debug-steps", type=int, default=200,
+@@ -141,6 +143,8 @@ parser.add_argument("--primal-drive-wd", dest="rda_drive_wd", type=float,
+ args = parser.parse_args()
+ if args.rda_mech:
+     args.rda = True
++if args.rda_gated_write:
++    args.rda = True
+ if args.rda_mech_const:
+     args.rda_mech = True
+     args.rda = True
+@@ -653,7 +657,8 @@ if rda_active:
+                            const_state=args.rda_const_state,
+                            const_state_seed=args.seed,
+                            decay=args.rda_decays if args.rda_decays is not None else 0.95,
+-                           mechanism=args.rda_mech)
++                           mechanism=args.rda_mech,
++                           gated_write=args.rda_gated_write)
+     rda_model = rda_model.to(device)
+     model = rda_model
+     if resuming:
+@@ -753,6 +758,8 @@ if rda_active:
+                      + list(rda_model.state.h_norm.parameters()))
+     if rda_model.content_proj is not None:
+         _drive_matrix += list(rda_model.content_proj.parameters())
++    if rda_model.gate_proj is not None:
++        _drive_matrix += list(rda_model.gate_proj.parameters())
+ 
+     _dmodel_lr_scale = (model_config_kwargs["n_embd"] / 768) ** -0.5
+     # NOTE: the training loop rescales every group as
+@@ -894,6 +901,8 @@ if rda_active:
+                                    | {id(p) for p in rda_model.state.h_norm.parameters()}
+         if rda_model.content_proj is not None:
+             _grad_free = _grad_free | {id(p) for p in rda_model.content_proj.parameters()}
++        if rda_model.gate_proj is not None:
++            _grad_free = _grad_free | {id(p) for p in rda_model.gate_proj.parameters()}
+     for _g in optimizer.param_groups:
+         if any(id(p) in _grad_free for p in _g["params"]):
+             _g["grad_free"] = True
+diff --git a/tests/test_mechanism_causality.py b/tests/test_mechanism_causality.py
+new file mode 100644
+index 0000000..f583a67
+--- /dev/null
++++ b/tests/test_mechanism_causality.py
+@@ -0,0 +1,42 @@
++"""CPU causality regression for the RDA mechanism and capacity control."""
++
++import sys
++import unittest
++from pathlib import Path
++
++import torch
++
++REPO = Path(__file__).resolve().parents[1]
++TESTS = Path(__file__).resolve().parent
++sys.path.insert(0, str(REPO))
++sys.path.insert(0, str(TESTS))
++
++from test_rda_mechanism import make_model
++
++
++class MechanismCausalityCPU(unittest.TestCase):
++    def setUp(self):
++        torch.set_num_threads(1)
++        torch.manual_seed(2026)
++        self.tokens = torch.randint(1, 128, (2, 16))
++
++    def assert_causal(self, name, model):
++        model.eval()
++        with torch.inference_mode():
++            reference_logits = model(self.tokens)
++            for k in (1, 4, 8, 12):
++                changed = self.tokens.clone()
++                changed[:, k:] = (changed[:, k:] % 127) + 1
++                logits = model(changed)
++                difference = (logits[:, :k] - reference_logits[:, :k]).abs().max().item()
++                print(f"{name} k={k} max_abs_diff={difference:.9g}", flush=True)
++                self.assertEqual(difference, 0.0,
++                                 f"future tokens changed {name} logits before position {k}")
++
++    def test_mechanism_and_constant_control_are_causal(self):
++        self.assert_causal("mechanism", make_model(17, mechanism=True))
++        self.assert_causal("control", make_model(17, mechanism=True, const=True))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_mechanism_gated.py b/tests/test_mechanism_gated.py
+new file mode 100644
+index 0000000..93b38fa
+--- /dev/null
++++ b/tests/test_mechanism_gated.py
+@@ -0,0 +1,131 @@
++"""CPU regression tests for the opt-in gated-write mechanism."""
++
++import unittest
++import time
++
++import torch
++
++from nanochat.gpt import GPT, GPTConfig
++from nanochat.rda import GPTWithRDA, RDAStateModule
++
++
++def make_model(seed=7, gated=True, const=False):
++    torch.manual_seed(seed)
++    cfg = GPTConfig(sequence_len=16, vocab_size=128, n_layer=2,
++                    n_head=2, n_kv_head=2, n_embd=64, window_pattern="L")
++    base = GPT(cfg)
++    base.init_weights()
++    return GPTWithRDA(base, debug_steps=0, check_leakage=False,
++                      gated_write=gated, const_state=const,
++                      const_state_seed=seed)
++
++
++class GatedWriteCPU(unittest.TestCase):
++    def setUp(self):
++        torch.set_num_threads(1)
++        torch.manual_seed(2026)
++        self.x = torch.randint(1, 128, (2, 16))
++        self.y = torch.randint(1, 128, (2, 16))
++
++    def test_flag_off_matches_reference_for_20_steps(self):
++        a = make_model(11, gated=False)
++        b = make_model(11, gated=False)
++        b.load_state_dict(a.state_dict())
++        ca = cb = None
++        for _ in range(20):
++            oa = a(self.x, self.y, E_t_external=ca)
++            ob = b(self.x, self.y, E_t_external=cb)
++            self.assertEqual(float((oa["loss"] - ob["loss"]).abs()), 0.0)
++            self.assertEqual(float((oa["E_next"] - ob["E_next"]).abs().max()), 0.0)
++            ca, cb = oa["E_next"].detach(), ob["E_next"].detach()
++
++    def test_sequence_equals_token_by_token(self):
++        m = make_model(13, gated=True)
++        h = torch.randn(2, 15, 64)
++        content, gate = m._gated_terms(h)
++        start = torch.randn(2, 8).clamp(-1, 1)
++        seq = m.state.gated_update_seq(start, content, gate)
++        e = start
++        out = []
++        for t in range(h.size(1)):
++            e = m.state.gated_update(e, content[:, t], gate[:, t])
++            out.append(e)
++        token = torch.stack(out, dim=1)
++        diff = float((seq - token).abs().max())
++        print(f"sequence_token_max_abs_diff={diff:.9g}", flush=True)
++        self.assertLessEqual(diff, 1e-6)
++
++    def _assert_causal(self, name, model):
++        model.eval()
++        with torch.inference_mode():
++            ref = model(self.x)
++            for k in (1, 4, 8, 12):
++                changed = self.x.clone()
++                changed[:, k:] = (changed[:, k:] % 127) + 1
++                got = model(changed)
++                diff = float((got[:, :k] - ref[:, :k]).abs().max())
++                print(f"{name} k={k} max_abs_diff={diff:.9g}", flush=True)
++                self.assertEqual(diff, 0.0)
++
++    def test_causality_mechanism_and_control(self):
++        self._assert_causal("mechanism", make_model(17, gated=True))
++        self._assert_causal("control", make_model(17, gated=True, const=True))
++
++    def test_initial_gates_and_retention(self):
++        m = make_model(19, gated=True)
++        h = torch.randn(256, 64)
++        with torch.no_grad():
++            _, g = m._gated_terms(h)
++        means = g.mean(0)
++        print("initial_g_mean=" + " ".join(f"{v:.8f}" for v in means), flush=True)
++        for power in (192, 832):
++            retention = (1.0 - means).pow(power)
++            print(f"retention_{power}=" + " ".join(f"{v:.8e}" for v in retention), flush=True)
++        self.assertTrue(torch.all((means > 0) & (means < 1)))
++
++    def test_control_optimizer_and_noncontrol_grads(self):
++        control = make_model(23, gated=True, const=True)
++        out = control(self.x, self.y)
++        out["loss"].backward()
++        self.assertTrue(all(p.grad is None for p in control.content_proj.parameters()))
++        self.assertTrue(all(p.grad is None for p in control.gate_proj.parameters()))
++        opt = torch.optim.Adam(control.parameters(), lr=1e-3)
++        for p in control.parameters():
++            if p.grad is None:
++                p.grad = torch.zeros_like(p)
++        opt.step()
++        live = make_model(23, gated=True)
++        with torch.no_grad():
++            live.state.film_scale.weight.normal_(0.0, 0.1)
++            live.state.film_shift.weight.normal_(0.0, 0.1)
++        live(self.x, self.y)["loss"].backward()
++        cg = sum(float(p.grad.abs().sum()) for p in live.content_proj.parameters())
++        gg = sum(float(p.grad.abs().sum()) for p in live.gate_proj.parameters())
++        print(f"noncontrol_content_grad_sum={cg:.9e} gate_grad_sum={gg:.9e}", flush=True)
++        self.assertTrue(torch.isfinite(torch.tensor(cg + gg)))
++        self.assertGreater(cg, 0.0)
++        self.assertGreater(gg, 0.0)
++
++    def test_loop_cost_and_initial_content_scale(self):
++        m = make_model(29, gated=True)
++        h = torch.randn(2, 15, 64)
++        content, gate = m._gated_terms(h)
++        print(f"content_std={content.std().item():.8f} event_term_std={torch.tanh(content).std().item():.8f}", flush=True)
++        self.assertTrue(0.35 < float(content.std()) < 0.65)
++        start = torch.zeros(2, 8)
++        old_drive = m.state.drive_seq(h, torch.zeros(2, 15))
++        n = 30
++        t0 = time.perf_counter()
++        for _ in range(n):
++            m.state.update_seq(start, old_drive)
++        old_s = time.perf_counter() - t0
++        t0 = time.perf_counter()
++        for _ in range(n):
++            m.state.gated_update_seq(start, content, gate)
++        gated_s = time.perf_counter() - t0
++        pct = 100.0 * (gated_s / old_s - 1.0)
++        print(f"gated_loop_cost_vs_existing_percent={pct:.3f}", flush=True)
++
++
++if __name__ == "__main__":
++    unittest.main(verbosity=2)
+
+commit 6ba72d19ce3b19c2ab423cbf9c596c40f12772e6
+Author:     zbarsbold54-creator <zbarsbold54@gmail.com>
+AuthorDate: Thu Oct 15 18:18:25 2026 +0800
+Commit:     zbarsbold54-creator <zbarsbold54@gmail.com>
+CommitDate: Thu Oct 15 18:18:25 2026 +0800
+
+    Harden follow-up driver lock
+
+diff --git a/run_followup.ps1 b/run_followup.ps1
+index 2b1c705..79a4fa1 100644
+--- a/run_followup.ps1
++++ b/run_followup.ps1
+@@ -57,6 +57,13 @@ e.main()
+     $text=[IO.File]::ReadAllText($out,[Text.Encoding]::UTF8)+"`r`n===== STDERR =====`r`n"+[IO.File]::ReadAllText($err,[Text.Encoding]::UTF8);[IO.File]::WriteAllText($result,$text,[Text.UTF8Encoding]::new($false));Add-LogLines @("EVAL_END label=$label exit=$($p.ExitCode) result=$result");if($p.ExitCode -ne 0){throw "Evaluation $label failed exit=$($p.ExitCode)"}
+ }
+ 
++$oldPid = 0
++if (Test-Path $lockPath) {
++    try { $oldPid = [int](Get-Content $lockPath -ErrorAction Stop | Select-Object -First 1) } catch { $oldPid = 0 }
++    if ($oldPid -gt 0 -and (Get-Process -Id $oldPid -ErrorAction SilentlyContinue)) {
++        throw "Another follow-up instance is live (PID $oldPid)."
++    }
++}
+ $lock=[IO.File]::Open($lockPath,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::Read)
+ try {
+     $lock.SetLength(0);$w=[IO.StreamWriter]::new($lock,[Text.UTF8Encoding]::new($false),1024,$true);$w.WriteLine($PID);$w.Flush();$w.Dispose();Add-LogLines @("RUN_START mode=$JobMode pid=$PID");Write-Status "Follow-up job has started." $JobMode "preparing" "unknown" "" "no mechanism test launched"
